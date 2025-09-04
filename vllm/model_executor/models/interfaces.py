@@ -1084,22 +1084,13 @@ class SupportsMRoPE(Protocol):
     """The interface required for all models that support M-RoPE."""
 
     supports_mrope: ClassVar[Literal[True]] = True
+    """
+    A flag that indicates this model supports M-RoPE.
 
     Note:
         There is no need to redefine this flag if this class is in the
         MRO of your model class.
     """
-    A flag that indicates this model supports M-RoPE.
-
-class SupportsTokenformer(Protocol):
-    """The interface required for all models that support Tokenformer."""
-
-    supports_tokenformer: ClassVar[Literal[True]] = True
-    """
-    A flag that indicates this model supports Tokenformer.
-
-    """
-
     def get_mrope_input_positions(
         self,
         input_tokens: list[int],
@@ -1121,6 +1112,16 @@ class SupportsTokenformer(Protocol):
             - mrope_position_delta: Delta for position calculations
         """
         ...
+
+@runtime_checkable
+class SupportsTokenformer(Protocol):
+    """The interface required for all models that support Tokenformer."""
+
+    supports_tokenformer: ClassVar[Literal[True]] = True
+    """
+    A flag that indicates this model supports Tokenformer.
+    """
+
 
 
 @overload
@@ -1149,7 +1150,6 @@ class SupportsXDRoPE(Protocol):
         There is no need to redefine this flag if this class is in the
         XDRope of your model class.
     """
-
     def get_xdrope_input_positions(
         self,
         input_tokens: list[int],
@@ -1196,7 +1196,6 @@ def supports_tokenformer(model: object) -> TypeIs[SupportsTokenformer]:
 
 
 def supports_tokenformer(
-    model: Union[type[object], object],
-) -> Union[TypeIs[type[SupportsTokenformer]], TypeIs[SupportsTokenformer]]:
+    model: type[object] | object,
+) -> TypeIs[type[SupportsTokenformer]] | TypeIs[SupportsTokenformer]:
     return isinstance(model, SupportsTokenformer)
->>>>>>> c3a9c1780 (Patch apply from previous changes to different upstream)
