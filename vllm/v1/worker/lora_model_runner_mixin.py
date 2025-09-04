@@ -95,10 +95,25 @@ class LoRAModelRunnerMixin:
             prompt_lora_mapping, token_lora_mapping, lora_requests, mapping_type
         )
 
+
     @contextmanager
-    def maybe_setup_dummy_loras(
+    def maybe_setup_dummy_loras(self, lora_config: Optional[LoRAConfig],
+                                 num_scheduled_tokens: np.ndarray):
+        # TODO: ScalarLM this is different from our original fork, see next method
+        if lora_config is None:
+            yield
+        else:
+            # __enter__ code
+            assert self.lora_manager is not None, "LoRA is not enabled"
+
+            num_loras = lora_config.max_loras
+            yield
+
+
+    def maybe_setup_dummy_loras_MAIN_FORK(
         self, lora_config: LoRAConfig | None, remove_lora: bool = True
     ):
+
         if lora_config is None:
             yield
         else:
@@ -143,6 +158,19 @@ class LoRAModelRunnerMixin:
         if num_sampled_tokens is None:
             num_sampled_tokens = np.ones_like(num_scheduled_tokens, dtype=np.int32)
 
+        if lora_config is None:
+            yield
+        else:
+            # __enter__ code
+            assert self.lora_manager is not None, "LoRA is not enabled"
+
+            num_reqs = len(num_scheduled_tokens)
+            num_loras = lora_config.max_loras
+            yield
+
+    @contextmanager
+    def maybe_select_dummy_loras_MAIN_FORK(self, lora_config: Optional[LoRAConfig],
+                                 num_scheduled_tokens: np.ndarray):
         if lora_config is None:
             yield
         else:
