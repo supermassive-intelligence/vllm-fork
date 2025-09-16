@@ -212,6 +212,7 @@ class LlamaAttention(nn.Module):
             if is_sliding:
                 sliding_window = config.sliding_window
 
+<<<<<<< HEAD
         attn_cls = (
             EncoderOnlyAttention
             if attn_type == AttentionType.ENCODER_ONLY
@@ -219,6 +220,9 @@ class LlamaAttention(nn.Module):
         )
 
         self.attn = attn_cls(
+=======
+        self.attn = Attention(
+>>>>>>> 860f26843 (remove islice, EncoderOnlyAttention)
             self.num_heads,
             self.head_dim,
             self.scaling,
@@ -413,7 +417,7 @@ class LlamaModel(nn.Module):
         else:
             self.norm = PPMissingLayer()
 
-        self.aux_hidden_state_layers = tuple[int, ...]()
+        self.aux_hidden_state_layers: tuple[int] = tuple()
 
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
@@ -442,8 +446,12 @@ class LlamaModel(nn.Module):
 
         aux_hidden_states = []
         for idx, layer in enumerate(
+<<<<<<< HEAD
             islice(self.layers, self.start_layer, self.end_layer)
         ):
+=======
+                self.layers[self.start_layer:self.end_layer]):
+>>>>>>> 860f26843 (remove islice, EncoderOnlyAttention)
             if idx in self.aux_hidden_state_layers:
                 aux_hidden_states.append(hidden_states + residual)
             hidden_states, residual = layer(positions, hidden_states, residual)
