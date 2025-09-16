@@ -147,13 +147,28 @@ class TokenformerModelManager(AdapterModelManager):
         model_state_dict = self.model.state_dict()
         tokenformers = self._registered_adapters[adapter_id].tokenformers
 
+        # Debug: Log current model state dict keys related to MLP
+        logger.info("Current model state_dict keys (MLP related):")
+        mlp_keys = [k for k in model_state_dict.keys() if 'mlp' in k]
+        for key in mlp_keys[:10]:  # Log first 10 MLP keys
+            logger.info(f"  {key}")
+        
+        # Debug: Log tokenformer keys being loaded
+        logger.info("Tokenformer keys to load:")
+        for key in tokenformers.keys():
+            logger.info(f"  {key}")
+
         for key, value in self.orig_lm_head.items():
             logger.info(f"Loading original lm head {key} from adapter {adapter_id}")
             model_state_dict[key] = value
 
         for key, value in tokenformers.items():
             logger.info(f"Loading {key} from adapter {adapter_id}")
-            model_state_dict[key] = value
+            if key in model_state_dict:
+                model_state_dict[key] = value
+            else:
+                logger.error(f"KEY NOT FOUND IN MODEL STATE DICT: {key}")
+                logger.error(f"Available keys containing 'mlp': {[k for k in model_state_dict.keys() if 'mlp' in k]}")
 
         load_result = self.model.load_state_dict(model_state_dict, strict=False)
 

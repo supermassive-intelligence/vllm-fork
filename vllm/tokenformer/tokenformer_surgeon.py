@@ -287,20 +287,40 @@ class TokenformerSurgeon(ABC):
         attn_count = 0
         wrapped_modules = set()
         
+        # Debug: Log all module names first
+        all_modules = list(self.model.named_modules())
+        logger.info(f"Found {len(all_modules)} total modules in model")
+        for name, layer in all_modules[:10]:  # Log first 10 modules
+            logger.debug(f"  Module: {name} -> {type(layer).__name__}")
+        
         for name, layer in self.model.named_modules():
             # Skip if this is a sub-module of an already wrapped module
             if any(name.startswith(wrapped + '.') for wrapped in wrapped_modules):
+                logger.debug(f"Skipping {name} (sub-module of wrapped module)")
                 continue
                 
             if self._is_mlp_layer(name):
+                logger.info(f"Found MLP layer to wrap: {name}")
                 self.update_mlp(name, layer)
                 if not isinstance(layer, TokenformerMLPAdapter):  # Only count if actually wrapped
                     mlp_count += 1
                     wrapped_modules.add(name)
             elif self._is_attn_layer(name):
+                logger.info(f"Found attention layer to wrap: {name}")
                 self.update_attn(name, layer)
                 attn_count += 1
                 wrapped_modules.add(name)
         
         logger.info(f"Tokenformer adapter insertion complete: {mlp_count} MLP layers, {attn_count} attention layers wrapped")
+        
+        # Debug: Check model structure after wrapping
+        logger.info("Model structure after wrapping:")
+        for name, module in self.model.named_modules():
+            if 'mlp' in name:
+                logger.info(f"  {name}: {type(module).__name__}")
+                if hasattr(module, 'tokenformer_k'):
+                    logger.info(f"    -> Has tokenformer_k parameter")
+                if hasattr(module, 'gate_up_proj'):
+                    logger.info(f"    -> Has gate_up_proj attribute")
+        
         return self.model
