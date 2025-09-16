@@ -15,13 +15,15 @@ logger = init_logger(__name__)
 class TokenformerMLPAdapter(nn.Module):
     def __init__(self, layer, hidden_size, device):
         super().__init__()
-        self.layer = layer
+        # Register the wrapped layer as a submodule so it's properly tracked
+        self.layer = layer if isinstance(layer, nn.Module) else layer
         self.hidden_size = hidden_size
         self.num_heads = int(os.getenv("TOKENFORMER_NUM_HEADS", "4"))
         self.head_dim = hidden_size // self.num_heads
         self.tokenformer_r = int(os.getenv("TOKENFORMER_R", "32"))
         self.dtype = next(layer.parameters()).dtype
 
+        # Register tokenformer parameters
         self.tokenformer_k = nn.Parameter(
             torch.zeros(self.num_heads, self.hidden_size, device=device, dtype=self.dtype)
         )
@@ -30,7 +32,6 @@ class TokenformerMLPAdapter(nn.Module):
                 self.num_heads, self.hidden_size * self.tokenformer_r, device=device, dtype=self.dtype
             )
         )
-
         self.tokenformer_p = nn.Parameter(
             torch.zeros(self.tokenformer_r, self.hidden_size, device=device, dtype=self.dtype)
         )
@@ -109,6 +110,47 @@ class TokenformerMLPAdapter(nn.Module):
 
         return result.view(query.shape)
 
+    def state_dict(self, destination=None, prefix='', keep_vars=False):
+        """Override state_dict to include both adapter and wrapped layer parameters."""
+        if destination is None:
+            destination = {}
+        
+        # Add tokenformer parameters
+        destination[prefix + 'tokenformer_k'] = self.tokenformer_k if keep_vars else self.tokenformer_k.data
+        destination[prefix + 'tokenformer_v'] = self.tokenformer_v if keep_vars else self.tokenformer_v.data
+        destination[prefix + 'tokenformer_p'] = self.tokenformer_p if keep_vars else self.tokenformer_p.data
+        
+        # Add wrapped layer's parameters with appropriate prefix
+        # The wrapped layer's params should appear at the same level, not under 'layer'
+        layer_state = self.layer.state_dict(prefix=prefix, keep_vars=keep_vars)
+        destination.update(layer_state)
+        
+        return destination
+    
+    def load_state_dict(self, state_dict, strict=True):
+        """Override load_state_dict to handle both adapter and wrapped layer parameters."""
+        # Extract tokenformer parameters
+        tokenformer_state = {}
+        layer_state = {}
+        
+        for key, value in state_dict.items():
+            if 'tokenformer_' in key:
+                # Remove any prefix to get the parameter name
+                param_name = key.split('.')[-1]
+                if hasattr(self, param_name):
+                    tokenformer_state[param_name] = value
+            else:
+                # This belongs to the wrapped layer
+                layer_state[key] = value
+        
+        # Load tokenformer parameters
+        for param_name, value in tokenformer_state.items():
+            getattr(self, param_name).data.copy_(value)
+        
+        # Load wrapped layer parameters
+        if layer_state:
+            self.layer.load_state_dict(layer_state, strict=False)
+    
     # Visualize the size of the parameters
     def __repr__(self):
         return (
@@ -211,6 +253,11 @@ class TokenformerSurgeon(ABC):
         """Try to wrap the layer with a TokenformerMLPAdaptor."""
         if not self._is_mlp_layer(name):
             return
+        
+        # Check if already wrapped to prevent double wrapping
+        if isinstance(layer, TokenformerMLPAdapter):
+            logger.warning(f"Layer {name} is already wrapped with TokenformerMLPAdapter, skipping")
+            return
 
         logger.info(f"Wrapping layer {name} with TokenformerMLPAdaptor, layer type: {type(layer).__name__}")
         
@@ -238,14 +285,22 @@ class TokenformerSurgeon(ABC):
         logger.info(f"Starting tokenformer adapter insertion...")
         mlp_count = 0
         attn_count = 0
+        wrapped_modules = set()
         
         for name, layer in self.model.named_modules():
+            # Skip if this is a sub-module of an already wrapped module
+            if any(name.startswith(wrapped + '.') for wrapped in wrapped_modules):
+                continue
+                
             if self._is_mlp_layer(name):
                 self.update_mlp(name, layer)
-                mlp_count += 1
-            if self._is_attn_layer(name):
+                if not isinstance(layer, TokenformerMLPAdapter):  # Only count if actually wrapped
+                    mlp_count += 1
+                    wrapped_modules.add(name)
+            elif self._is_attn_layer(name):
                 self.update_attn(name, layer)
                 attn_count += 1
+                wrapped_modules.add(name)
         
         logger.info(f"Tokenformer adapter insertion complete: {mlp_count} MLP layers, {attn_count} attention layers wrapped")
         return self.model
