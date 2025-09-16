@@ -115,7 +115,21 @@ class LlamaMLP(nn.Module):
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
-        x, _ = self.gate_up_proj(x)
+        try:
+            x, _ = self.gate_up_proj(x)
+        except (KeyError, AttributeError, RuntimeError) as e:
+            print(f"DEBUG: Error in LlamaMLP.forward: {type(e).__name__}: {e}")
+            print(f"DEBUG: Available attributes: {list(self.__dict__.keys())}")
+            print(f"DEBUG: gate_up_proj exists: {hasattr(self, 'gate_up_proj')}")
+            if hasattr(self, 'gate_up_proj'):
+                print(f"DEBUG: gate_up_proj type: {type(self.gate_up_proj)}")
+                # Try to access parameters to see what's failing
+                try:
+                    params = list(self.gate_up_proj.named_parameters())
+                    print(f"DEBUG: gate_up_proj parameters: {[p[0] for p in params]}")
+                except Exception as param_e:
+                    print(f"DEBUG: Error accessing gate_up_proj parameters: {param_e}")
+            raise
         x = self.act_fn(x)
         x, _ = self.down_proj(x)
         return x
@@ -212,7 +226,6 @@ class LlamaAttention(nn.Module):
             if is_sliding:
                 sliding_window = config.sliding_window
 
-<<<<<<< HEAD
         attn_cls = (
             EncoderOnlyAttention
             if attn_type == AttentionType.ENCODER_ONLY
@@ -220,9 +233,6 @@ class LlamaAttention(nn.Module):
         )
 
         self.attn = attn_cls(
-=======
-        self.attn = Attention(
->>>>>>> 860f26843 (remove islice, EncoderOnlyAttention)
             self.num_heads,
             self.head_dim,
             self.scaling,
@@ -446,12 +456,8 @@ class LlamaModel(nn.Module):
 
         aux_hidden_states = []
         for idx, layer in enumerate(
-<<<<<<< HEAD
             islice(self.layers, self.start_layer, self.end_layer)
         ):
-=======
-                self.layers[self.start_layer:self.end_layer]):
->>>>>>> 860f26843 (remove islice, EncoderOnlyAttention)
             if idx in self.aux_hidden_state_layers:
                 aux_hidden_states.append(hidden_states + residual)
             hidden_states, residual = layer(positions, hidden_states, residual)
@@ -612,7 +618,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3, Supp
             self.model.make_empty_intermediate_tensors
         )
 
-    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+    def set_aux_hidden_state_layers(self, layers: tuple[int]) -> None:
         self.model.aux_hidden_state_layers = layers
 
     def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
