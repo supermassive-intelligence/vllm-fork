@@ -55,7 +55,12 @@ class TokenformerMLPAdapter(nn.Module):
 
     # Call layer with all inputs and kwargs
     def forward(self, query: torch.Tensor):
-        base_layer_results = self.layer(query)
+        try:
+            base_layer_results = self.layer(query)
+        except Exception as e:
+            logger.error(f"Error calling wrapped layer {type(self.layer).__name__}: {e}")
+            logger.error(f"Layer attributes: {dir(self.layer)}")
+            raise
 
         tokenformer_results = self.tokenformer_op_1(query)
 
@@ -177,12 +182,23 @@ class TokenformerSurgeon(ABC):
     def __init__(self, model: nn.Module, device: torch.device):
         self.model = model
         self.device = device
+        
+        # Get config from model - handle different model structures
+        if hasattr(model, 'config'):
+            self.config = model.config
+        elif hasattr(model, 'model') and hasattr(model.model, 'config'):
+            self.config = model.model.config
+        else:
+            raise ValueError("Cannot find config in model structure")
+            
+        logger.info(f"TokenformerSurgeon initialized with config: hidden_size={self.config.hidden_size}")
 
     def _is_attn_layer(self, layer_name):
         return layer_name.split(".")[-1] == "attn"
 
     def _is_mlp_layer(self, layer_name):
-        return "mlp" in layer_name.split(".")[-1]
+        # Only wrap the MLP module itself, not its sub-modules like gate_up_proj
+        return layer_name.endswith('.mlp')
 
     def _recursive_setattr(self, obj, attr, value):
         attr = attr.split(".", 1)
@@ -196,14 +212,20 @@ class TokenformerSurgeon(ABC):
         if not self._is_mlp_layer(name):
             return
 
-        logger.info(f"Wrapping layer {name} with TokenformerMLPAdaptor")
+        logger.info(f"Wrapping layer {name} with TokenformerMLPAdaptor, layer type: {type(layer).__name__}")
+        
+        # Debug: Check what attributes the layer has
+        if hasattr(layer, 'gate_up_proj'):
+            logger.debug(f"  - Layer has gate_up_proj attribute")
+        if hasattr(layer, 'forward'):
+            logger.debug(f"  - Layer has forward method")
 
         # Wrap the layer with a TokenformerMLPAdapter
         self._recursive_setattr(
             self.model,
             name,
             TokenformerMLPAdapter(
-                layer, self.model.config.hidden_size, device=self.device
+                layer, self.config.hidden_size, device=self.device
             ),
         )
 
@@ -213,8 +235,17 @@ class TokenformerSurgeon(ABC):
 
     def insert_adapter_modules(self):
         # Add tokenformer adapters for mlp and attention
+        logger.info(f"Starting tokenformer adapter insertion...")
+        mlp_count = 0
+        attn_count = 0
+        
         for name, layer in self.model.named_modules():
-            self.update_mlp(name, layer)
-            self.update_attn(name, layer)
-
+            if self._is_mlp_layer(name):
+                self.update_mlp(name, layer)
+                mlp_count += 1
+            if self._is_attn_layer(name):
+                self.update_attn(name, layer)
+                attn_count += 1
+        
+        logger.info(f"Tokenformer adapter insertion complete: {mlp_count} MLP layers, {attn_count} attention layers wrapped")
         return self.model
