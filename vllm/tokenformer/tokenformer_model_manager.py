@@ -98,9 +98,8 @@ class TokenformerModel(AdapterModel):
         state_dict = torch.load(checkpoint_file, map_location=device)
         module_state_dict = state_dict['model_state_dict']
         for module, tensor in module_state_dict.items():
-            if any(key in module for key in ("tokenformer", "lm_head")):
-                logger.info(f"Loading {module} from {checkpoint_file}")
-                tokenformers[module] = tensor.to(device)
+            logger.info(f"Loading {module} from {checkpoint_file}")
+            tokenformers[module] = tensor.to(device)
 
         return cls(tokenformers)
 
@@ -122,13 +121,7 @@ class TokenformerModelManager(AdapterModelManager):
         self.tokenformer_model_cls = TokenformerModel
         self.dtype = next(self.model.parameters()).dtype
         self.device = device
-        self.orig_lm_head = copy.deepcopy(
-            {
-                k: v.to(self.dtype)
-                for k, v in self.model.state_dict().items()
-                if "lm_head" in k
-            }
-        )
+        self.orig_params = {}
         self._lru_adaptor_ids = []
 
     def activate_adapter(self, adapter_id: int) -> bool:
@@ -145,19 +138,30 @@ class TokenformerModelManager(AdapterModelManager):
         model_state_dict = self.model.state_dict()
         tokenformers = self._registered_adapters[adapter_id].tokenformers
 
-        for key, value in self.orig_lm_head.items():
-            logger.info(f"Loading original lm head {key} from adapter {adapter_id}")
+        for key, value in model_state_dict.items():
+            logger.debug(f"Model param before loading: {key}, {value.dtype}, {value.device}, {value.shape}")
+
+        for key, value in self.orig_params.items():
+            logger.info(f"Loading original param {key}")
             model_state_dict[key] = value
 
         for key, value in tokenformers.items():
             logger.info(f"Loading {key} from adapter {adapter_id}")
             model_state_dict[key] = value
 
-        self.model.load_state_dict(model_state_dict, strict=False)
+            self._register_original_param(key, value)
+
+        #self.model.load_state_dict(model_state_dict, strict=False)
+        self.model.load_weights(model_state_dict.items())
 
         self._active_adapter = adapter_id
 
         return True
+
+    def _register_original_param(self, key: str, value: torch.Tensor) -> None:
+        if key not in self.orig_params:
+            logger.info(f"Registering original param {key}")
+            self.orig_params[key] = copy.deepcopy(value).to(self.device)
 
     def update_lru_position(self, adapter_id: int) -> None:
         if adapter_id in self._lru_adaptor_ids:
@@ -173,10 +177,7 @@ class TokenformerModelManager(AdapterModelManager):
         tokenformers = self._registered_adapters[adapter_id].tokenformers
 
         for key in tokenformers:
-            if "tokenformer_p" in key:
-                nn.init.zeros_(model_state_dict[key])
-            elif "lm_head" in key:
-                model_state_dict[key] = self.orig_lm_head[key]
+            model_state_dict[key] = self.orig_params[key]
 
         self.model.load_state_dict(model_state_dict, strict=False)
 
@@ -251,16 +252,16 @@ class TokenformerModelManager(AdapterModelManager):
     @property
     def adapter_slots(self) -> int:
         pass
-    
+
     @contextmanager
     def dummy_lora_cache(self):
         """Context manager for dummy LoRA cache during warmup."""
         # Simple pass-through context manager since tokenformer doesn't need special cache handling
         yield
-    
+
     def add_dummy_lora(self, lora_request, rank: int = 8):
         """Add a dummy LoRA for warmup purposes.
-        
+
         Args:
             lora_request: The LoRA request object
             rank: The rank for the dummy LoRA (default 8)

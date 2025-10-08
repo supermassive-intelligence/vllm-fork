@@ -225,4 +225,6 @@ class TokenformerSurgeon(ABC):
             self.update_mlp(name, layer)
             self.update_attn(name, layer)
 
+        logger.info(f"Tokenformer adapters inserted, full model is:\n{self.model}")
+
         return self.model
