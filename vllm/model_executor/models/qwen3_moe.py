@@ -465,6 +465,7 @@ class Qwen3MoeModel(nn.Module):
         loaded_params: set[str] = set()
         expert_params_mapping = self.get_expert_mapping()
         for name, loaded_weight in weights:
+            logger.debug("Loading weight: %s", name)
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
                 if weight_name not in name:
@@ -700,8 +701,8 @@ class Qwen3MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA,
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()
 
-    def state_dict(self, destination=None, prefix='', keep_vars=False):
-        state_dict = super().state_dict(destination, prefix, keep_vars)
+    def state_dict(self):
+        state_dict = super().state_dict()
 
         # unpack keys ending in qkv_proj.weight to separate q_proj, k_proj, v_proj
         for packed_key, unpacked_keys in self.packed_modules_mapping.items():
