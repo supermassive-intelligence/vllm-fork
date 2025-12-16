@@ -65,8 +65,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.sequence import IntermediateTensors
 
-<<<<<<< HEAD
-from .interfaces import MixtureOfExperts, SupportsEagle3, SupportsLoRA, SupportsPP
+from .interfaces import MixtureOfExperts, SupportsEagle3, SupportsLoRA, SupportsPP, SupportsTokenformer
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -76,13 +75,6 @@ from .utils import (
     make_layers,
     maybe_prefix,
 )
-=======
-from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP, SupportsTokenformer
-from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
-                    is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers,
-                    maybe_prefix)
->>>>>>> c3a9c1780 (Patch apply from previous changes to different upstream)
 
 logger = init_logger(__name__)
 
@@ -642,14 +634,9 @@ class Qwen3MoeModel(nn.Module):
         return loaded_params
 
 
-<<<<<<< HEAD
 class Qwen3MoeForCausalLM(
-    nn.Module, SupportsPP, SupportsLoRA, SupportsEagle3, MixtureOfExperts
+    nn.Module, SupportsPP, SupportsLoRA, SupportsEagle3, MixtureOfExperts, SupportsTokenformer
 ):
-=======
-class Qwen3MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA,
-                          MixtureOfExperts, SupportsTokenformer):
->>>>>>> c3a9c1780 (Patch apply from previous changes to different upstream)
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -764,8 +751,8 @@ class Qwen3MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA,
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()
 
-    def state_dict(self, destination=None, prefix='', keep_vars=False):
-        state_dict = super().state_dict(destination, prefix, keep_vars)
+    def state_dict(self):
+        state_dict = super().state_dict()
 
         # unpack keys ending in qkv_proj.weight to separate q_proj, k_proj, v_proj
         for packed_key, unpacked_keys in self.packed_modules_mapping.items():
