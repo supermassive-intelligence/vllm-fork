@@ -550,6 +550,16 @@ class Gemma3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         for key in keys_to_remove:
             state_dict.pop(key)
 
+        # remove keys related to attention scales
+        keys_to_remove = []
+
+        for key in state_dict.keys():
+            if key.endswith(("._q_scale", "._k_scale", "._v_scale", "._prob_scale")):
+                keys_to_remove.append(key)
+
+        for key in keys_to_remove:
+            state_dict.pop(key)
+
         for key in state_dict.keys():
             logger.debug("State dict key: %s", key)
 
