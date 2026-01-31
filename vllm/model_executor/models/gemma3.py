@@ -561,6 +561,6 @@ class Gemma3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             state_dict.pop(key)
 
         for key in state_dict.keys():
-            logger.debug("State dict key: %s", key)
+            logger.debug(f"State dict key: {key}, shape: {state_dict[key].shape}")
 
         return state_dict
