@@ -51,7 +51,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
 
-from .interfaces import SupportsLoRA, SupportsPP
+from .interfaces import SupportsLoRA, SupportsPP, SupportsTokenformer
 from .utils import (
     AutoWeightsLoader,
     extract_layer_index,
@@ -381,6 +381,8 @@ class Gemma3Model(nn.Module):
             ("gate_up_proj", "up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
+        print("Gemma 3 params")
+        print(params_dict.keys())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             # Revert +1 during llama.cpp conversion
@@ -449,7 +451,7 @@ class Gemma3Model(nn.Module):
         return loaded_params
 
 
-class Gemma3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+class Gemma3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsTokenformer):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",

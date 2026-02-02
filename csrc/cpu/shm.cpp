@@ -27,10 +27,12 @@ struct KernelVecType<float> {
   using scalar_vec_t = vec_op::FP32Vec16;
 };
 
+#ifdef ARM_BF16_SUPPORT
 template <>
 struct KernelVecType<c10::BFloat16> {
   using scalar_vec_t = vec_op::BF16Vec16;
 };
+#endif
 
 template <>
 struct KernelVecType<c10::Half> {

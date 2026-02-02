@@ -157,11 +157,11 @@ if (AVX512_FOUND AND NOT AVX512_DISABLED)
         set(ENABLE_AMXBF16 OFF)
         message(WARNING "Disable AMX_BF16 ISA support, no amx_bf16 found in local CPU flags." " If cross-compilation is required, please set env VLLM_CPU_AMXBF16=1.")
     endif()
-    
+
 elseif (AVX2_FOUND)
     list(APPEND CXX_COMPILE_FLAGS "-mavx2")
     message(WARNING "vLLM CPU backend using AVX2 ISA")
-    
+
 elseif (POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)
     message(STATUS "PowerPC detected")
     if (POWER9_FOUND)
@@ -184,9 +184,9 @@ elseif (ASIMD_FOUND)
         add_compile_definitions(ARM_BF16_SUPPORT)
     else()
         message(WARNING "BF16 functionality is not available")
-        set(MARCH_FLAGS "-march=armv8.2-a+dotprod+fp16")  
+        set(MARCH_FLAGS "-march=armv8.2-a+dotprod+fp16")
     endif()
-    list(APPEND CXX_COMPILE_FLAGS ${MARCH_FLAGS})     
+    list(APPEND CXX_COMPILE_FLAGS ${MARCH_FLAGS})
 elseif (S390_FOUND)
     message(STATUS "S390 detected")
     # Check for S390 VXE support
@@ -242,7 +242,7 @@ if ((AVX512_FOUND AND NOT AVX512_DISABLED) OR (ASIMD_FOUND AND NOT APPLE_SILICON
                 SUBBUILD_DIR "${FETCHCONTENT_BASE_DIR}/arm_compute-subbuild"
                 SOURCE_DIR   "${FETCHCONTENT_BASE_DIR}/arm_compute-src"
                 GIT_REPOSITORY https://github.com/ARM-software/ComputeLibrary.git
-                GIT_TAG        v52.6.0
+                GIT_TAG        v52.8.0
                 GIT_SHALLOW    TRUE
                 GIT_PROGRESS   TRUE
             )
@@ -252,15 +252,15 @@ if ((AVX512_FOUND AND NOT AVX512_DISABLED) OR (ASIMD_FOUND AND NOT APPLE_SILICON
 
         # Build ACL with CMake
         set(_cmake_config_cmd
-             ${CMAKE_COMMAND} -G Ninja -B build 
-            -DARM_COMPUTE_BUILD_SHARED_LIB=OFF 
-            -DCMAKE_BUILD_TYPE=Release 
-            -DARM_COMPUTE_ARCH=armv8.2-a 
-            -DARM_COMPUTE_ENABLE_ASSERTS=OFF 
-            -DARM_COMPUTE_ENABLE_CPPTHREADS=OFF 
-            -DARM_COMPUTE_ENABLE_OPENMP=ON 
-            -DARM_COMPUTE_ENABLE_WERROR=OFF 
-            -DARM_COMPUTE_BUILD_EXAMPLES=OFF 
+             ${CMAKE_COMMAND} -G Ninja -B build
+            -DARM_COMPUTE_BUILD_SHARED_LIB=OFF
+            -DCMAKE_BUILD_TYPE=Release
+            -DARM_COMPUTE_ARCH=armv8.2-a
+            -DARM_COMPUTE_ENABLE_ASSERTS=OFF
+            -DARM_COMPUTE_ENABLE_CPPTHREADS=OFF
+            -DARM_COMPUTE_ENABLE_OPENMP=ON
+            -DARM_COMPUTE_ENABLE_WERROR=OFF
+            -DARM_COMPUTE_BUILD_EXAMPLES=OFF
             -DARM_COMPUTE_BUILD_TESTING=OFF)
         set(_cmake_build_cmd
             ${CMAKE_COMMAND} --build build -- -j${NPROC}
