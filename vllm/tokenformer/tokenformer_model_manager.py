@@ -121,10 +121,13 @@ class TokenformerModelManager:
         for key in tokenformers:
             if "tokenformer_p" in key:
                 nn.init.zeros_(model_state_dict[key])
-            elif key in self.original_tensors:
-                model_state_dict[key] = self.original_tensors[key]
 
-        self.model.load_state_dict(model_state_dict, strict=False)
+        for key, value in self.original_tensors.items():
+            logger.info(f"Restoring original tensor {key} after deactivating adapter {adapter_id}")
+            model_state_dict[key] = self.original_tensors[key]
+
+        self.model.load_weights(model_state_dict.items())
+        process_weights_after_loading(self.model, self.model.model_config, self.device)
 
     def add_adapter(self, request) -> bool:
         lora_path = get_adapter_absolute_path(request.lora_path)
