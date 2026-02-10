@@ -338,16 +338,45 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3, Supp
             for key in list(state_dict.keys()):
                 if key.endswith(f"{packed_key}.weight"):
                     weight = state_dict.pop(key)
-                    split_weights = torch.chunk(weight, len(unpacked_keys), dim=0)
-                    for unpacked_key, split_weight in zip(unpacked_keys,
-                                                         split_weights):
+                    logger.debug(f"Unpacking {key} into {unpacked_keys}, original size: {weight.shape}")
+
+                    # Calculate split sizes based on the type of packed parameter
+                    if packed_key == "qkv_proj":
+                        # For qkv_proj, q, k, v can have different sizes due to GQA
+                        tp_size = get_tensor_model_parallel_world_size()
+                        num_heads = self.config.num_attention_heads // tp_size
+                        num_kv_heads = max(1, self.config.num_key_value_heads // tp_size)
+                        head_dim = self.config.head_dim
+                        q_size = num_heads * head_dim
+                        kv_size = num_kv_heads * head_dim
+                        split_sizes = [q_size, kv_size, kv_size]
+                        split_weights = torch.split(weight, split_sizes, dim=0)
+                    else:
+                        # For other packed weights (like gate_up_proj), split equally
+                        split_weights = torch.chunk(weight, len(unpacked_keys), dim=0)
+
+                    for unpacked_key, split_weight in zip(unpacked_keys, split_weights):
                         new_key = key.replace(packed_key, unpacked_key)
                         state_dict[new_key] = split_weight
+                        logger.debug(f"Created {new_key} with size: {split_weight.shape}")
+
                 elif key.endswith(f"{packed_key}.bias"):
                     bias = state_dict.pop(key)
-                    split_biases = torch.chunk(bias, len(unpacked_keys), dim=0)
-                    for unpacked_key, split_bias in zip(unpacked_keys,
-                                                       split_biases):
+
+                    # Calculate split sizes for bias (same logic as weights)
+                    if packed_key == "qkv_proj":
+                        tp_size = get_tensor_model_parallel_world_size()
+                        num_heads = self.config.num_attention_heads // tp_size
+                        num_kv_heads = max(1, self.config.num_key_value_heads // tp_size)
+                        head_dim = self.config.head_dim
+                        q_size = num_heads * head_dim
+                        kv_size = num_kv_heads * head_dim
+                        split_sizes = [q_size, kv_size, kv_size]
+                        split_biases = torch.split(bias, split_sizes, dim=0)
+                    else:
+                        split_biases = torch.chunk(bias, len(unpacked_keys), dim=0)
+
+                    for unpacked_key, split_bias in zip(unpacked_keys, split_biases):
                         new_key = key.replace(packed_key, unpacked_key)
                         state_dict[new_key] = split_bias
 
