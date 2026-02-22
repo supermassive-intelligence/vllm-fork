@@ -147,6 +147,9 @@ class TokenformerModelManager:
 
         return True
 
+    def supports_tower_connector_lora(self):
+        return False
+
     def set_active_adapters(self, lora_requests, lora_mapping):
         if len(lora_requests) == 0:
             self.deactivate_all_adapters()
