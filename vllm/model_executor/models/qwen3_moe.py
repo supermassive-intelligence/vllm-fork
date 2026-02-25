@@ -789,38 +789,94 @@ class Qwen3MoeForCausalLM(
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()
 
-    def state_dict(self):
-        state_dict = super().state_dict()
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("qkv_proj", "q_proj", "q"),
+            ("qkv_proj", "k_proj", "k"),
+            ("qkv_proj", "v_proj", "v"),
+            ("gate_up_proj", "gate_proj", 0),
+            ("gate_up_proj", "up_proj", 1),
+        ]
 
-        # unpack keys ending in qkv_proj.weight to separate q_proj, k_proj, v_proj
-        for packed_key, unpacked_keys in self.packed_modules_mapping.items():
-            for key in list(state_dict.keys()):
-                if key.endswith(f"{packed_key}.weight"):
-                    weight = state_dict.pop(key)
-                    split_weights = torch.chunk(weight, len(unpacked_keys), dim=0)
-                    for unpacked_key, split_weight in zip(unpacked_keys,
-                                                         split_weights):
-                        new_key = key.replace(packed_key, unpacked_key)
-                        state_dict[new_key] = split_weight
-                elif key.endswith(f"{packed_key}.bias"):
-                    bias = state_dict.pop(key)
-                    split_biases = torch.chunk(bias, len(unpacked_keys), dim=0)
-                    for unpacked_key, split_bias in zip(unpacked_keys,
-                                                       split_biases):
-                        new_key = key.replace(packed_key, unpacked_key)
-                        state_dict[new_key] = split_bias
+        params_dict = dict(self.named_parameters())
+        loaded_params: set[str] = set()
+        expert_params_mapping = self.get_expert_mapping()
+        for name, loaded_weight in weights:
+            if "rotary_emb.inv_freq" in name:
+                continue
 
-        # remove keys related to expert weights
-        keys_to_remove = []
+            if name.startswith("mtp."):
+                continue
 
-        for key in state_dict.keys():
-            if ".experts." in key:
-                keys_to_remove.append(key)
+            # Remapping the name of FP8 kv-scale.
+            if name.endswith("scale"):
+                name = maybe_remap_kv_scale_name(name, params_dict)
+                if name is None:
+                    continue
 
-        for key in keys_to_remove:
-            state_dict.pop(key)
+            for param_name, weight_name, shard_id in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
 
-        for key in state_dict.keys():
-            logger.debug("State dict key: %s", key)
+                if "mlp.experts" in name:
+                    continue
 
-        return state_dict
+                name = name.replace(weight_name, param_name)
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                # Skip layers on other devices.
+                if is_pp_missing_parameter(name, self):
+                    continue
+                # name = apply_attn_prefix(name, params_dict)
+                if name not in params_dict:
+                    continue
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                for mapping in expert_params_mapping:
+                    param_name, weight_name, expert_id, shard_id = mapping
+                    if weight_name not in name:
+                        continue
+                    name = name.replace(weight_name, param_name)
+                    # Skip layers on other devices.
+                    if is_pp_missing_parameter(name, self):
+                        continue
+                    # Skip loading extra bias for GPTQ models.
+                    if (
+                        name.endswith(".bias") or name.endswith("_bias")
+                    ) and name not in params_dict:
+                        continue
+                    if name not in params_dict:
+                        continue
+                    param = params_dict[name]
+                    weight_loader = param.weight_loader
+                    weight_loader(
+                        param,
+                        loaded_weight,
+                        name,
+                        shard_id=shard_id,
+                        expert_id=expert_id,
+                    )
+                    break
+                else:
+                    # Skip loading extra bias for GPTQ models.
+                    if name.endswith(".bias") and name not in params_dict:
+                        continue
+                    if is_pp_missing_parameter(name, self):
+                        continue
+                    if name not in params_dict:
+                        logger.warning_once(
+                            f"Parameter {name} not found in params_dict, skip loading"
+                        )
+                        continue
+                    param = params_dict[name]
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
+                    weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
