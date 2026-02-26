@@ -877,6 +877,12 @@ class Qwen3MoeForCausalLM(
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
                     )
-                    weight_loader(param, loaded_weight)
+                    weight_loader(
+                        param,
+                        loaded_weight,
+                        name,
+                        shard_id=shard_id,
+                        expert_id=expert_id,
+                    )
             loaded_params.add(name)
         return loaded_params
