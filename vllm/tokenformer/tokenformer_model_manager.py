@@ -96,6 +96,9 @@ class TokenformerModelManager:
 
         for key, value in tokenformers.items():
             logger.info(f"Loading {key} from adapter {adapter_id}")
+            if 'lora' in key:
+                continue
+
             model_state_dict[key] = value
 
         self.model.load_weights(model_state_dict.items())
