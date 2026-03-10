@@ -381,6 +381,8 @@ class Gemma3Model(nn.Module):
             ("gate_up_proj", "up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
+        print("Gemma 3 params")
+        print(params_dict.keys())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             # Revert +1 during llama.cpp conversion
@@ -427,6 +429,7 @@ class Gemma3Model(nn.Module):
                     continue
                 if is_pp_missing_parameter(name, self):
                     continue
+                logger.debug(f"Loading shard {shard_id} {shard_name} for parameter {name}")
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)

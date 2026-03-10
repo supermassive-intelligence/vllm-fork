@@ -65,7 +65,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import MixtureOfExperts, SupportsEagle3, SupportsLoRA, SupportsPP
+from .interfaces import MixtureOfExperts, SupportsEagle3, SupportsLoRA, SupportsPP, SupportsTokenformer
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -678,7 +678,7 @@ class Qwen3MoeModel(nn.Module):
 
 
 class Qwen3MoeForCausalLM(
-    nn.Module, SupportsPP, SupportsLoRA, SupportsEagle3, MixtureOfExperts
+    nn.Module, SupportsPP, SupportsLoRA, SupportsEagle3, MixtureOfExperts, SupportsTokenformer
 ):
     packed_modules_mapping = {
         "qkv_proj": [
