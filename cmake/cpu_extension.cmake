@@ -188,7 +188,7 @@ if (ENABLE_X86_ISA OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND 
                 SUBBUILD_DIR "${FETCHCONTENT_BASE_DIR}/arm_compute-subbuild"
                 SOURCE_DIR   "${FETCHCONTENT_BASE_DIR}/arm_compute-src"
                 GIT_REPOSITORY https://github.com/ARM-software/ComputeLibrary.git
-                GIT_TAG        v52.6.0
+                GIT_TAG        v52.8.0
                 GIT_SHALLOW    TRUE
                 GIT_PROGRESS   TRUE
             )

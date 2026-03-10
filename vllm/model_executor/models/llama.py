@@ -65,6 +65,7 @@ from .interfaces import (
     SupportsEagle3,
     SupportsLoRA,
     SupportsPP,
+    SupportsTokenformer
 )
 from .utils import (
     AutoWeightsLoader,
@@ -504,7 +505,7 @@ class LlamaModel(nn.Module):
 
 
 class LlamaForCausalLM(
-    nn.Module, SupportsLoRA, SupportsPP, SupportsEagle, SupportsEagle3
+    nn.Module, SupportsLoRA, SupportsPP, SupportsEagle, SupportsEagle3, SupportsTokenformer
 ):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],

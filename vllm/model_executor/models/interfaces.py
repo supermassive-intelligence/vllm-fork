@@ -17,6 +17,7 @@ from typing import (
     Literal,
     Protocol,
     TypeAlias,
+    Union,
     overload,
     runtime_checkable,
 )
@@ -1420,6 +1421,15 @@ class SupportsMRoPE(Protocol):
         ...
 
 
+class SupportsTokenformer(Protocol):
+    """The interface required for all models that support Tokenformer."""
+
+    supports_tokenformer: ClassVar[Literal[True]] = True
+    """
+    A flag that indicates this model supports Tokenformer.
+
+    """
+
 @overload
 def supports_mrope(model: type[object]) -> TypeIs[type[SupportsMRoPE]]: ...
 
@@ -1481,3 +1491,15 @@ def supports_xdrope(
     model: type[object] | object,
 ) -> TypeIs[type[SupportsXDRoPE]] | TypeIs[SupportsXDRoPE]:
     return isinstance(model, SupportsXDRoPE)
+
+@overload
+def supports_tokenformer(model: type[object]) -> TypeIs[type[SupportsTokenformer]]: ...
+
+
+@overload
+def supports_tokenformer(model: object) -> TypeIs[SupportsTokenformer]: ...
+
+def supports_tokenformer(
+    model: Union[type[object], object],
+) -> Union[TypeIs[type[SupportsTokenformer]], TypeIs[SupportsTokenformer]]:
+    return isinstance(model, SupportsTokenformer)

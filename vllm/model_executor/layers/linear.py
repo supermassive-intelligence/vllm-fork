@@ -209,7 +209,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
         if current_platform.is_cpu():
             from vllm.model_executor.layers.utils import dispatch_cpu_unquantized_gemm
 
-            dispatch_cpu_unquantized_gemm(layer, remove_weight=True)
+            dispatch_cpu_unquantized_gemm(layer, remove_weight=False)
 
     def apply(
         self,
