@@ -1427,7 +1427,7 @@ class SupportsTokenformer(Protocol):
     """
 
 
-
+@runtime_checkable
 class SupportsTokenformer(Protocol):
     """The interface required for all models that support Tokenformer."""
 
