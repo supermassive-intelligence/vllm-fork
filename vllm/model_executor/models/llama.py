@@ -367,12 +367,12 @@ class LlamaModel(nn.Module):
 
         self.config = config
         self.quant_config = quant_config
-
-        self.vocab_size = config.vocab_size
-
-        if get_pp_group().is_first_rank or (
-            config.tie_word_embeddings and get_pp_group().is_last_rank
-        ):
+        lora_vocab = (lora_config.lora_extra_vocab_size *
+                      (lora_config.max_loras or 1)) if lora_config else 0
+        self.vocab_size = config.vocab_size #+ lora_vocab
+        self.org_vocab_size = config.vocab_size
+        if get_pp_group().is_first_rank or (config.tie_word_embeddings
+                                            and get_pp_group().is_last_rank):
             self.embed_tokens = VocabParallelEmbedding(
                 self.vocab_size,
                 config.hidden_size,
@@ -390,7 +390,7 @@ class LlamaModel(nn.Module):
         else:
             self.norm = PPMissingLayer()
 
-        self.aux_hidden_state_layers = tuple[int, ...]()
+        self.aux_hidden_state_layers: tuple[int] = tuple()
 
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
@@ -537,6 +537,9 @@ class LlamaForCausalLM(
         )
 
         if get_pp_group().is_last_rank:
+            self.unpadded_vocab_size = config.vocab_size
+            #if lora_config:
+            #    self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
             self.lm_head = ParallelLMHead(
                 config.vocab_size,
                 config.hidden_size,
@@ -557,7 +560,7 @@ class LlamaForCausalLM(
             self.model.make_empty_intermediate_tensors
         )
 
-    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+    def set_aux_hidden_state_layers(self, layers: tuple[int]) -> None:
         self.model.aux_hidden_state_layers = layers
 
     def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:

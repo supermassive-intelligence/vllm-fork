@@ -130,9 +130,9 @@ elseif (ASIMD_FOUND)
         add_compile_definitions(ARM_BF16_SUPPORT)
     else()
         message(WARNING "BF16 functionality is not available")
-        set(MARCH_FLAGS "-march=armv8.2-a+dotprod+fp16")  
+        set(MARCH_FLAGS "-march=armv8.2-a+dotprod+fp16")
     endif()
-    list(APPEND CXX_COMPILE_FLAGS ${MARCH_FLAGS})     
+    list(APPEND CXX_COMPILE_FLAGS ${MARCH_FLAGS})
 elseif (S390_FOUND)
     message(STATUS "S390 detected")
     # Check for S390 VXE support
@@ -198,15 +198,15 @@ if (ENABLE_X86_ISA OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND 
 
         # Build ACL with CMake
         set(_cmake_config_cmd
-             ${CMAKE_COMMAND} -G Ninja -B build 
-            -DARM_COMPUTE_BUILD_SHARED_LIB=OFF 
-            -DCMAKE_BUILD_TYPE=Release 
-            -DARM_COMPUTE_ARCH=armv8.2-a 
-            -DARM_COMPUTE_ENABLE_ASSERTS=OFF 
-            -DARM_COMPUTE_ENABLE_CPPTHREADS=OFF 
-            -DARM_COMPUTE_ENABLE_OPENMP=ON 
-            -DARM_COMPUTE_ENABLE_WERROR=OFF 
-            -DARM_COMPUTE_BUILD_EXAMPLES=OFF 
+             ${CMAKE_COMMAND} -G Ninja -B build
+            -DARM_COMPUTE_BUILD_SHARED_LIB=OFF
+            -DCMAKE_BUILD_TYPE=Release
+            -DARM_COMPUTE_ARCH=armv8.2-a
+            -DARM_COMPUTE_ENABLE_ASSERTS=OFF
+            -DARM_COMPUTE_ENABLE_CPPTHREADS=OFF
+            -DARM_COMPUTE_ENABLE_OPENMP=ON
+            -DARM_COMPUTE_ENABLE_WERROR=OFF
+            -DARM_COMPUTE_BUILD_EXAMPLES=OFF
             -DARM_COMPUTE_BUILD_TESTING=OFF)
         set(_cmake_build_cmd
             ${CMAKE_COMMAND} --build build -- -j${NPROC}
