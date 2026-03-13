@@ -77,6 +77,7 @@ from .interfaces import (
     MultiModalEmbeddings,
     SupportsLoRA,
     SupportsPP,
+    SupportsTokenformer,
     _require_is_multimodal,
 )
 from .qwen2_moe import Qwen2MoeMLP as Qwen3NextMLP
@@ -520,6 +521,7 @@ class Qwen3_5ForCausalLMBase(
     HasInnerState,
     SupportsLoRA,
     SupportsPP,
+    SupportsTokenformer
 ):
     packed_modules_mapping = {
         "qkv_proj": [
