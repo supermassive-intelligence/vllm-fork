@@ -11,7 +11,6 @@ import numpy
 import torch
 from torch import fx
 
-from vllm._custom_ops import cutlass_scaled_mm_supports_fp4
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 
@@ -20,6 +19,7 @@ if TYPE_CHECKING:
 
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
+MXFP_SCALE_DTYPE = torch.uint8
 
 
 def get_fp8_min_max() -> tuple[float, float]:
@@ -151,6 +151,18 @@ kFp8Static128BlockSym = QuantKey(FP8_DTYPE, kStatic128BlockScale, symmetric=True
 
 kDynamic64Scale = ScaleDesc(torch.float32, False, GroupShape(1, 64))
 kFp8Dynamic64Sym = QuantKey(FP8_DTYPE, kDynamic64Scale, symmetric=True)
+
+# TODO (zyongye): Convert all the torch.dtype to scale_dtype
+# Changing that requires changing torch compile fused AR+Quant Quant key
+# to avoid assertion error
+kMxfp4DynamicGroupScale = ScaleDesc(MXFP_SCALE_DTYPE, False, GroupShape(1, 32))
+kMxfp4Dynamic = QuantKey(FP4_DTYPE, scale=kMxfp4DynamicGroupScale, symmetric=True)
+
+kMxfp8DynamicGroupScale = ScaleDesc(MXFP_SCALE_DTYPE, False, GroupShape(1, 32))
+kMxfp8Dynamic = QuantKey(FP8_DTYPE, scale=kMxfp8DynamicGroupScale, symmetric=True)
+
+kMxfp4StaticGroupScale = ScaleDesc(MXFP_SCALE_DTYPE, True, GroupShape(1, 32))
+kMxfp4Static = QuantKey(FP4_DTYPE, scale=kMxfp4StaticGroupScale, symmetric=True)
 
 
 # Normalize the group_shape to the full extent for any dims that are -1
@@ -766,60 +778,6 @@ def awq_pack(
     q_w = q_w.reshape((-1, size_n)).contiguous()
 
     return pack_cols(q_w, num_bits, size_k, size_n)
-
-
-def swizzle_blockscale(scale: torch.Tensor) -> torch.Tensor:
-    """
-    Pad and block-interleave the FP4 block-scales so that they match the data
-    layout expected by the CUTLASS / FlashInfer kernels.
-
-    Parameters
-    ----------
-    scale: torch.Tensor
-
-    Returns
-    -------
-    torch.Tensor
-        The swizzled tensor with the same logical shape as *scale*.
-    """
-    assert scale.dtype == torch.float8_e4m3fn, (
-        "swizzle_blockscale expects the input tensor to be in "
-        "torch.float8_e4m3fn format."
-    )
-
-    scale_ndim = scale.ndim
-    if scale_ndim == 2:
-        scale = scale.unsqueeze(0)  # (1, M, K)
-    assert scale.ndim == 3, "Expected a 2-D or 3-D tensor for block scales."
-
-    B, M, K = scale.shape
-
-    def _round_up(x: int, m: int) -> int:
-        return (x + m - 1) // m * m
-
-    M_padded = _round_up(M, 128)
-    K_padded = _round_up(K, 4)
-
-    padded = torch.zeros(
-        (B, M_padded, K_padded), dtype=scale.dtype, device=scale.device
-    )
-    padded[:B, :M, :K] = scale
-
-    # Reshape / permute to the layout required by the kernel.
-    padded = padded.reshape(B, M_padded // 128, 4, 32, K_padded // 4, 4)
-    swizzled = padded.permute(0, 1, 4, 3, 2, 5).contiguous().cuda()
-
-    if scale_ndim == 2:
-        return swizzled.reshape(M_padded, K_padded)
-    return swizzled.reshape(B, M_padded, K_padded)
-
-
-def cutlass_fp4_supported() -> bool:
-    if not current_platform.is_cuda():
-        return False
-    capability_tuple = current_platform.get_device_capability()
-    capability = -1 if capability_tuple is None else capability_tuple.to_int()
-    return cutlass_scaled_mm_supports_fp4(capability)
 
 
 def convert_bf16_scales_to_fp8(

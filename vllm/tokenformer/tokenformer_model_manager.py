@@ -1,10 +1,8 @@
 import torch
 from contextlib import contextmanager
 from torch import nn
-from safetensors.torch import safe_open
 from pathlib import Path
-from typing import Optional, Any, Dict, List
-from collections import OrderedDict
+from typing import Optional, Any, Dict
 import copy
 from vllm.tokenformer.tokenformer_surgeon import (
     TokenformerSurgeon,
