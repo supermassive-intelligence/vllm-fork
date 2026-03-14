@@ -1426,17 +1426,6 @@ class SupportsTokenformer(Protocol):
     A flag that indicates this model supports Tokenformer.
     """
 
-
-@runtime_checkable
-class SupportsTokenformer(Protocol):
-    """The interface required for all models that support Tokenformer."""
-
-    supports_tokenformer: ClassVar[Literal[True]] = True
-    """
-    A flag that indicates this model supports Tokenformer.
-
-    """
-
 @overload
 def supports_mrope(model: type[object]) -> TypeIs[type[SupportsMRoPE]]: ...
 
