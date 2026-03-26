@@ -34,6 +34,8 @@ try:
                     device = torch.cuda.current_device()
                     return torch.cuda.caching_allocator_alloc(size, device=device, stream=stream)
                 return torch_alloc_fn
+            def __call__(self, size, alignment, stream):
+                return self.get()(size, alignment, stream)
 
         # FIXED: set value inside the ContextVar, not replace it
         _allocation._allocator.set(TorchAllocator())
