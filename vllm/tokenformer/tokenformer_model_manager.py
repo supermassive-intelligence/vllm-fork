@@ -1,10 +1,8 @@
 import torch
 from contextlib import contextmanager
 from torch import nn
-from safetensors.torch import safe_open
 from pathlib import Path
-from typing import Optional, Any, Dict, List
-from collections import OrderedDict
+from typing import Optional, Any, Dict
 import copy
 from vllm.tokenformer.tokenformer_surgeon import (
     TokenformerSurgeon,
@@ -13,10 +11,41 @@ from vllm.model_executor.models import SupportsLoRA, supports_tokenformer
 from vllm.lora.utils import get_adapter_absolute_path, get_lora_id
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
+from vllm.distributed import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
 
 import os
 
 logger = init_logger(__name__)
+
+# Weights that vLLM shards on dim 0 (output_dim) across TP ranks
+_TP_SHARD_DIM0 = ("q_proj", "k_proj", "v_proj", "embed_tokens", "lm_head", "gate_proj", "up_proj")
+# Weights that vLLM shards on dim 1 (input_dim) across TP ranks
+_TP_SHARD_DIM1 = ("o_proj", "down_proj")
+
+
+def _shard_for_tp(key: str, tensor: torch.Tensor) -> torch.Tensor:
+    """Shard a full unsharded tensor for the current TP rank."""
+    tp_rank = get_tensor_model_parallel_rank()
+    tp_size = get_tensor_model_parallel_world_size()
+
+    if tp_size == 1:
+        return tensor
+
+    if any(k in key for k in _TP_SHARD_DIM0):
+        shard_size = tensor.shape[0] // tp_size
+        start = tp_rank * shard_size
+        return tensor[start:start + shard_size, :]
+
+    if any(k in key for k in _TP_SHARD_DIM1):
+        shard_size = tensor.shape[1] // tp_size
+        start = tp_rank * shard_size
+        return tensor[:, start:start + shard_size]
+
+    # Replicated weight (norms, tokenformer params, etc.) — no sharding needed
+    return tensor
 
 
 class TokenformerModel:
@@ -30,7 +59,6 @@ class TokenformerModel:
     def from_local_checkpoint(
         cls, model_dir: str, device: torch.device
     ) -> "TokenformerModel":
-        # Find all .pt files in the directory
         files = list(Path(model_dir).glob("*.pt"))
 
         if len(files) == 0:
@@ -46,6 +74,7 @@ class TokenformerModel:
             tokenformers[module] = tensor.to(device)
 
         return cls(tokenformers)
+
 
 class TokenformerModelManager:
     """A manager that manages tokenformer models."""
@@ -65,6 +94,9 @@ class TokenformerModelManager:
         self.tokenformer_model_cls = TokenformerModel
         self.dtype = next(self.model.parameters()).dtype
         self.device = device
+        # Stores the original (already TP-sharded) parameter data before an
+        # adapter overwrites it, so we can restore it on deactivation without
+        # going through load_weights again.
         self.original_tensors = {}
         self._lru_adaptor_ids = []
 
@@ -76,37 +108,50 @@ class TokenformerModelManager:
             return False
 
         self.update_lru_position(adapter_id)
-
         logger.info(f"Activating Tokenformer - {adapter_id}")
-
-        model_state_dict = self.model.state_dict()
 
         tokenformers = self._registered_adapters[adapter_id].tokenformers
 
-        # Save original tensors if not already saved
-        for key in tokenformers:
-            if key not in self.original_tensors:
-                logger.info(f"Saving original tensor {key} before loading adapter {adapter_id}")
-                if key in model_state_dict:
-                    self.original_tensors[key] = copy.deepcopy(model_state_dict[key])
+        # Save the current (sharded) param values before we overwrite them,
+        # so _deactivate_adapter can restore them directly without re-sharding.
+        for name, param in self.model.named_parameters():
+            if name in tokenformers and name not in self.original_tensors:
+                logger.info(f"Saving original tensor {name} before loading adapter {adapter_id}")
+                self.original_tensors[name] = param.data.clone()
 
-        for key, value in self.original_tensors.items():
-            logger.info(f"Loading original tensor {key} from adapter {adapter_id}")
-            model_state_dict[key] = value
+        # Build a full model state dict, then overwrite only the adapter keys
+        # after sharding them to match the current TP rank.
+        model_state_dict = self.model.state_dict()
 
         for key, value in tokenformers.items():
-            logger.info(f"Loading {key} from adapter {adapter_id}")
             if 'lora' in key:
                 continue
-
-            model_state_dict[key] = value
+            logger.info(f"Loading {key} from adapter {adapter_id}")
+            model_state_dict[key] = _shard_for_tp(key, value)
 
         self.model.load_weights(model_state_dict.items())
         process_weights_after_loading(self.model, self.model.model_config, self.device)
 
         self._active_adapter = adapter_id
-
         return True
+
+    def _deactivate_adapter(self, adapter_id: int):
+        logger.info(f"Deactivating Tokenformer - {adapter_id}")
+
+        tokenformers = self._registered_adapters[adapter_id].tokenformers
+
+        # Restore original param data directly — these are already TP-sharded
+        # so we bypass load_weights entirely to avoid double-sharding.
+        for name, param in self.model.named_parameters():
+            if name in tokenformers:
+                if "tokenformer_p" in name:
+                    nn.init.zeros_(param)
+                elif name in self.original_tensors:
+                    logger.info(f"Restoring original tensor {name}")
+                    param.data.copy_(self.original_tensors[name])
+
+        process_weights_after_loading(self.model, self.model.model_config, self.device)
+        self._active_adapter = None
 
     def update_lru_position(self, adapter_id: int) -> None:
         if adapter_id in self._lru_adaptor_ids:
@@ -116,22 +161,6 @@ class TokenformerModelManager:
     def deactivate_adapter(self, adapter_id: int) -> bool:
         return self._deactivate_adapter(adapter_id)
 
-    def _deactivate_adapter(self, adapter_id: int):
-        logger.info(f"Deactivating Tokenformer - {adapter_id}")
-        model_state_dict = self.model.state_dict()
-        tokenformers = self._registered_adapters[adapter_id].tokenformers
-
-        for key in tokenformers:
-            if "tokenformer_p" in key:
-                nn.init.zeros_(model_state_dict[key])
-
-        for key, value in self.original_tensors.items():
-            logger.info(f"Restoring original tensor {key} after deactivating adapter {adapter_id}")
-            model_state_dict[key] = self.original_tensors[key]
-
-        self.model.load_weights(model_state_dict.items())
-        process_weights_after_loading(self.model, self.model.model_config, self.device)
-
     def add_adapter(self, request) -> bool:
         lora_path = get_adapter_absolute_path(request.lora_path)
         tokenformer = self.tokenformer_model_cls.from_local_checkpoint(
@@ -139,7 +168,6 @@ class TokenformerModelManager:
         )
 
         if len(self._registered_adapters) >= self.capacity:
-            # Remove the least recently used adapter
             lru_adapter_id = self._lru_adaptor_ids.pop(0)
             self.remove_adapter(lru_adapter_id)
 
@@ -147,7 +175,6 @@ class TokenformerModelManager:
         self._lru_adaptor_ids.append(request.adapter_id)
 
         logger.info(f"Adapter {request.adapter_id} added")
-
         return True
 
     def supports_tower_connector_lora(self):
@@ -209,20 +236,12 @@ class TokenformerModelManager:
 
     @contextmanager
     def dummy_lora_cache(self):
-        """Context manager for dummy LoRA cache during warmup."""
-        # Simple pass-through context manager since tokenformer doesn't need special cache handling
         yield
 
     def add_dummy_lora(self, lora_request, rank: int = 8):
-        """Add a dummy LoRA for warmup purposes.
-
-        Args:
-            lora_request: The LoRA request object
-            rank: The rank for the dummy LoRA (default 8)
-        """
-        # Tokenformer doesn't need to actually add dummy LoRAs, just accept the call
         logger.debug(f"Adding dummy LoRA {lora_request.lora_name} with rank {rank} (no-op for tokenformer)")
         pass
+
 
 def add_adapter(adapter: Any, registered_adapters: dict[int, Any],
                 capacity: int, add_func: callable) -> bool:
@@ -233,6 +252,7 @@ def add_adapter(adapter: Any, registered_adapters: dict[int, Any],
         registered_adapters[adapter.id] = adapter
         return True
     return False
+
 
 def deactivate_adapter(adapter_id: int, active_adapters: dict[int, None],
                        deactivate_func: callable) -> bool:
