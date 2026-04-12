@@ -112,28 +112,30 @@ class TokenformerModelManager:
 
         tokenformers = self._registered_adapters[adapter_id].tokenformers
 
-        # Save the current (sharded) param values before we overwrite them,
-        # so _deactivate_adapter can restore them directly without re-sharding.
+        # Save current (already sharded) param values directly from the model
+        # before overwriting, so we can restore without going through load_weights
         for name, param in self.model.named_parameters():
             if name in tokenformers and name not in self.original_tensors:
                 logger.info(f"Saving original tensor {name} before loading adapter {adapter_id}")
                 self.original_tensors[name] = param.data.clone()
 
-        # Build a full model state dict, then overwrite only the adapter keys
-        # after sharding them to match the current TP rank.
-        model_state_dict = self.model.state_dict()
-
+        # Write adapter weights directly into params, sharding as needed.
+        # Bypass load_weights entirely to avoid double-sharding from state_dict.
+        param_dict = dict(self.model.named_parameters())
         for key, value in tokenformers.items():
             if 'lora' in key:
                 continue
+            if key not in param_dict:
+                logger.warning(f"Key {key} not found in model parameters, skipping")
+                continue
             logger.info(f"Loading {key} from adapter {adapter_id}")
-            model_state_dict[key] = _shard_for_tp(key, value)
+            sharded = _shard_for_tp(key, value)
+            param_dict[key].data.copy_(sharded)
 
-        self.model.load_weights(model_state_dict.items())
-        process_weights_after_loading(self.model, self.model.model_config, self.device)
+    process_weights_after_loading(self.model, self.model.model_config, self.device)
 
-        self._active_adapter = adapter_id
-        return True
+    self._active_adapter = adapter_id
+    return True
 
     def _deactivate_adapter(self, adapter_id: int):
         logger.info(f"Deactivating Tokenformer - {adapter_id}")
