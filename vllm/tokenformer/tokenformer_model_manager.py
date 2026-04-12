@@ -132,10 +132,10 @@ class TokenformerModelManager:
             sharded = _shard_for_tp(key, value)
             param_dict[key].data.copy_(sharded)
 
-    process_weights_after_loading(self.model, self.model.model_config, self.device)
+        process_weights_after_loading(self.model, self.model.model_config, self.device)
 
-    self._active_adapter = adapter_id
-    return True
+        self._active_adapter = adapter_id
+        return True
 
     def _deactivate_adapter(self, adapter_id: int):
         logger.info(f"Deactivating Tokenformer - {adapter_id}")
