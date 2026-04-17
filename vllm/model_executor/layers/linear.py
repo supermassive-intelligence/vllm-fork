@@ -212,7 +212,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
 
             from vllm.model_executor.layers.utils import dispatch_cpu_unquantized_gemm
 
-            dispatch_cpu_unquantized_gemm(layer, remove_weight=True)
+            dispatch_cpu_unquantized_gemm(layer, remove_weight=False)
         elif current_platform.is_xpu():
             # Opt-in: F.linear on XPU is faster with an N-contiguous (N, K) weight
             # when K > N, but oneDNN's ab-weights matmul is not run-to-run bitwise
@@ -1091,6 +1091,7 @@ class QKVParallelLinear(ColumnParallelLinear):
             "k": self.num_kv_heads * self.head_size,
             "v": self.num_kv_heads * self.v_head_size,
         }
+        logger.debug(f"shard_size_mapping: {shard_size_mapping}")
         return shard_size_mapping.get(loaded_shard_id)
 
     def _load_fused_module_from_checkpoint(
@@ -1177,6 +1178,7 @@ class QKVParallelLinear(ColumnParallelLinear):
             shard_size, shard_offset = adjust_block_scale_shard(
                 weight_block_size, shard_size, shard_offset
             )
+        logger.debug(f'Loading shard_id={loaded_shard_id} offset={shard_offset} size={shard_size}')
 
         param.load_qkv_weight(
             loaded_weight=loaded_weight,
@@ -1780,3 +1782,5 @@ class RowParallelLinear(LinearBase):
         s += f", tp_size={self.tp_size}"
         s += f", reduce_results={self.reduce_results}"
         return s
+
+
