@@ -18,6 +18,7 @@ from typing import (
     Literal,
     Protocol,
     TypeAlias,
+    Union,
     overload,
     runtime_checkable,
 )
@@ -886,7 +887,7 @@ class IsHybrid(Protocol):
     is_hybrid: ClassVar[Literal[True]] = True
     """
         A flag that indicates this model has both mamba and attention blocks
-        , also indicates that the model's hf_config has 
+        , also indicates that the model's hf_config has
         'layers_block_type' """
 
     @classmethod
@@ -1516,7 +1517,7 @@ class SupportsEagle(SupportsEagleBase, Protocol):
 
     supports_eagle: ClassVar[Literal[True]] = True
     """
-    A flag that indicates this model supports EAGLE-1 and EAGLE-2 
+    A flag that indicates this model supports EAGLE-1 and EAGLE-2
     speculative decoding.
 
     Note:
@@ -1546,7 +1547,7 @@ class SupportsEagle3(SupportsEagleBase, Protocol):
 
     supports_eagle3: ClassVar[Literal[True]] = True
     """
-    A flag that indicates this model supports EAGLE-3 
+    A flag that indicates this model supports EAGLE-3
     speculative decoding.
 
     Note:
@@ -1600,10 +1601,8 @@ class SupportsEagle3(SupportsEagleBase, Protocol):
         num_layers = len(holder.layers)
         return (2, num_layers // 2, num_layers - 3)
 
-
 @overload
 def supports_eagle3(model: type[object]) -> TypeIs[type[SupportsEagle3]]: ...
-
 
 @overload
 def supports_eagle3(model: object) -> TypeIs[SupportsEagle3]: ...
@@ -1627,7 +1626,6 @@ class SupportsMRoPE(Protocol):
         There is no need to redefine this flag if this class is in the
         MRO of your model class.
     """
-
     def get_mrope_input_positions(
         self,
         input_tokens: list[int],
@@ -1650,6 +1648,14 @@ class SupportsMRoPE(Protocol):
         """
         ...
 
+@runtime_checkable
+class SupportsTokenformer(Protocol):
+    """The interface required for all models that support Tokenformer."""
+
+    supports_tokenformer: ClassVar[Literal[True]] = True
+    """
+    A flag that indicates this model supports Tokenformer.
+    """
 
 @overload
 def supports_mrope(model: type[object]) -> TypeIs[type[SupportsMRoPE]]: ...
@@ -1677,7 +1683,6 @@ class SupportsXDRoPE(Protocol):
         There is no need to redefine this flag if this class is in the
         XDRope of your model class.
     """
-
     def get_xdrope_input_positions(
         self,
         input_tokens: list[int],
@@ -1873,3 +1878,17 @@ def supports_encoder_cudagraph(
     model: type[object] | object,
 ) -> TypeIs[type[SupportsEncoderCudaGraph]] | TypeIs[SupportsEncoderCudaGraph]:
     return isinstance(model, SupportsEncoderCudaGraph)
+
+
+@overload
+def supports_tokenformer(model: type[object]) -> TypeIs[type[SupportsTokenformer]]: ...
+
+
+@overload
+def supports_tokenformer(model: object) -> TypeIs[SupportsTokenformer]: ...
+
+
+def supports_tokenformer(
+    model: Union[type[object], object],
+) -> Union[TypeIs[type[SupportsTokenformer]], TypeIs[SupportsTokenformer]]:
+    return isinstance(model, SupportsTokenformer)
