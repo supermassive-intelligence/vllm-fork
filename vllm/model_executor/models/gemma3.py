@@ -51,7 +51,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
 
-from .interfaces import SupportsLoRA, SupportsPP
+from .interfaces import SupportsLoRA, SupportsPP, SupportsTokenformer
 from .utils import (
     AutoWeightsLoader,
     extract_layer_index,
@@ -381,6 +381,8 @@ class Gemma3Model(nn.Module):
             ("gate_up_proj", "up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
+        print("Gemma 3 params")
+        print(params_dict.keys())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             # Revert +1 during llama.cpp conversion
@@ -427,6 +429,7 @@ class Gemma3Model(nn.Module):
                     continue
                 if is_pp_missing_parameter(name, self):
                     continue
+                logger.debug(f"Loading shard {shard_id} {shard_name} for parameter {name}")
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
@@ -449,7 +452,7 @@ class Gemma3Model(nn.Module):
         return loaded_params
 
 
-class Gemma3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+class Gemma3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsTokenformer):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -518,3 +521,78 @@ class Gemma3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(weights)
+
+    def state_dict(self, destination=None, prefix='', keep_vars=False):
+        state_dict = super().state_dict(destination, prefix, keep_vars)
+
+        # unpack keys ending in qkv_proj.weight to separate q_proj, k_proj, v_proj
+        for packed_key, unpacked_keys in self.packed_modules_mapping.items():
+            for key in list(state_dict.keys()):
+                if key.endswith(f"{packed_key}.weight"):
+                    weight = state_dict.pop(key)
+                    logger.debug(f"Unpacking {key} into {unpacked_keys}, original size: {weight.shape}")
+
+                    # Calculate split sizes based on the type of packed parameter
+                    if packed_key == "qkv_proj":
+                        # For qkv_proj, q, k, v can have different sizes due to GQA
+                        tp_size = get_tensor_model_parallel_world_size()
+                        num_heads = self.config.num_attention_heads // tp_size
+                        num_kv_heads = max(1, self.config.num_key_value_heads // tp_size)
+                        head_dim = self.config.head_dim
+                        q_size = num_heads * head_dim
+                        kv_size = num_kv_heads * head_dim
+                        split_sizes = [q_size, kv_size, kv_size]
+                        split_weights = torch.split(weight, split_sizes, dim=0)
+                    else:
+                        # For other packed weights (like gate_up_proj), split equally
+                        split_weights = torch.chunk(weight, len(unpacked_keys), dim=0)
+
+                    for unpacked_key, split_weight in zip(unpacked_keys, split_weights):
+                        new_key = key.replace(packed_key, unpacked_key)
+                        state_dict[new_key] = split_weight
+                        logger.debug(f"Created {new_key} with size: {split_weight.shape}")
+
+                elif key.endswith(f"{packed_key}.bias"):
+                    bias = state_dict.pop(key)
+
+                    # Calculate split sizes for bias (same logic as weights)
+                    if packed_key == "qkv_proj":
+                        tp_size = get_tensor_model_parallel_world_size()
+                        num_heads = self.config.num_attention_heads // tp_size
+                        num_kv_heads = max(1, self.config.num_key_value_heads // tp_size)
+                        head_dim = self.config.head_dim
+                        q_size = num_heads * head_dim
+                        kv_size = num_kv_heads * head_dim
+                        split_sizes = [q_size, kv_size, kv_size]
+                        split_biases = torch.split(bias, split_sizes, dim=0)
+                    else:
+                        split_biases = torch.chunk(bias, len(unpacked_keys), dim=0)
+
+                    for unpacked_key, split_bias in zip(unpacked_keys, split_biases):
+                        new_key = key.replace(packed_key, unpacked_key)
+                        state_dict[new_key] = split_bias
+
+        # remove keys related to expert weights
+        keys_to_remove = []
+
+        for key in state_dict.keys():
+            if ".experts." in key:
+                keys_to_remove.append(key)
+
+        for key in keys_to_remove:
+            state_dict.pop(key)
+
+        # remove keys related to attention scales
+        keys_to_remove = []
+
+        for key in state_dict.keys():
+            if key.endswith(("._q_scale", "._k_scale", "._v_scale", "._prob_scale")):
+                keys_to_remove.append(key)
+
+        for key in keys_to_remove:
+            state_dict.pop(key)
+
+        for key in state_dict.keys():
+            logger.debug(f"State dict key: {key}, shape: {state_dict[key].shape}")
+
+        return state_dict

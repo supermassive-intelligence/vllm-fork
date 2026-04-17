@@ -27,10 +27,12 @@ struct KernelVecType<float> {
   using scalar_vec_t = vec_op::FP32Vec16;
 };
 
+#ifdef ARM_BF16_SUPPORT
 template <>
 struct KernelVecType<c10::BFloat16> {
   using scalar_vec_t = vec_op::BF16Vec16;
 };
+#endif
 
 template <>
 struct KernelVecType<c10::Half> {
@@ -39,9 +41,6 @@ struct KernelVecType<c10::Half> {
 
 struct ThreadSHMContext {
 #ifdef __aarch64__
-  // memory model is weaker on AArch64, so we use atomic variables for
-  // consumer (load-acquire) and producer (store-release) to make sure
-  // that a stamp cannot be ready before the corresponding data is ready.
   std::atomic<char> _curr_thread_stamp[2];
   std::atomic<char> _ready_thread_stamp[2];
   static_assert(std::atomic<char>::is_always_lock_free);
@@ -475,6 +474,7 @@ void memcpy(void* dst, void* src, const int64_t bytes) {
   }
 }
 
+// Vectorized all-reduce: only instantiated when scalar_vec_t != void.
 template <typename scalar_t, int RANKS>
 void all_reduce_sum_impl(ThreadSHMContext* ctx, scalar_t* data,
                          size_t elem_num) {
@@ -483,7 +483,7 @@ void all_reduce_sum_impl(ThreadSHMContext* ctx, scalar_t* data,
   constexpr int64_t vec_elem_num = vec_t::get_elem_num();
   const int worldsize = ctx->group_size;
 
-  shm_cc_ops::shm_cc_loop<scalar_t>(
+  shm_cc_loop<scalar_t>(
       ctx, elem_num,
       [&](ThreadSHMContext* thread_ctx, int64_t data_offset,
           int64_t data_elem_num, bool fast_mode) {
@@ -503,8 +503,7 @@ void all_reduce_sum_impl(ThreadSHMContext* ctx, scalar_t* data,
           thread_ctx->wait_for_all(ThreadSHMContext::check_no_buffer_conflict);
         }
 
-        shm_cc_ops::memcpy_to_shm(thread_shm_ptr, thread_data_ptr,
-                                  thread_data_elem_num);
+        memcpy_to_shm(thread_shm_ptr, thread_data_ptr, thread_data_elem_num);
         thread_ctx->commit_ready_stamp();
         int64_t aligned_data_elem_num =
             (data_elem_num / vec_elem_num) * vec_elem_num;
@@ -512,54 +511,109 @@ void all_reduce_sum_impl(ThreadSHMContext* ctx, scalar_t* data,
         thread_ctx->wait_for_all(ThreadSHMContext::check_stamp_ready);
 #pragma GCC unroll 4
         for (; i < aligned_data_elem_num; i += vec_elem_num) {
-          vec_t local_data(thread_data_ptr + i);  // load from cache
+          vec_t local_data(thread_data_ptr + i);
           vec_op::FP32Vec16 local_data_fp32(local_data);
           vec_op::unroll_loop<int, RANKS - 1>([&](int idx) {
-            vec_t remote_data(
-                true, remote_data_ptrs[idx] + i);  // stream load from shm
+            vec_t remote_data(true, remote_data_ptrs[idx] + i);
             vec_op::FP32Vec16 remote_data_fp32(remote_data);
-            local_data_fp32 = local_data_fp32 + remote_data_fp32;  // sum reduce
+            local_data_fp32 = local_data_fp32 + remote_data_fp32;
           });
           vec_t reduced_data(local_data_fp32);
           reduced_data.save(thread_data_ptr + i);
         }
 
         if (i < data_elem_num) {
-          vec_t local_data(thread_data_ptr + i);  // load from cache
+          vec_t local_data(thread_data_ptr + i);
           vec_op::FP32Vec16 local_data_fp32(local_data);
           vec_op::unroll_loop<int, RANKS - 1>([&](int idx) {
-            vec_t remote_data(
-                true, remote_data_ptrs[idx] + i);  // stream load from shm
+            vec_t remote_data(true, remote_data_ptrs[idx] + i);
             vec_op::FP32Vec16 remote_data_fp32(remote_data);
-            local_data_fp32 = local_data_fp32 + remote_data_fp32;  // sum reduce
+            local_data_fp32 = local_data_fp32 + remote_data_fp32;
           });
           vec_t reduced_data(local_data_fp32);
           reduced_data.save(thread_data_ptr + i,
                             data_elem_num - aligned_data_elem_num);
         }
       });
-
-  return;
 }
+
+// Scalar fallback all-reduce: used when scalar_vec_t == void
+// (e.g. BFloat16 on ARM without the BF16 hardware extension).
+template <typename scalar_t, int RANKS>
+void all_reduce_sum_scalar_impl(ThreadSHMContext* ctx, scalar_t* data,
+                                size_t elem_num) {
+  CPU_KERNEL_GUARD_IN(all_reduce_sum_scalar_impl)
+
+  shm_cc_loop<scalar_t>(
+      ctx, elem_num,
+      [&](ThreadSHMContext* thread_ctx, int64_t data_offset,
+          int64_t data_elem_num, bool fast_mode) {
+        int rank = thread_ctx->rank;
+        scalar_t* thread_shm_ptr =
+            thread_ctx->get_thread_shm_ptr<scalar_t>(rank);
+        scalar_t* thread_data_ptr = data + data_offset;
+
+        scalar_t* remote_data_ptrs[RANKS - 1];
+        vec_op::unroll_loop<int, RANKS - 1>([&](int idx) {
+          remote_data_ptrs[idx] = thread_ctx->get_thread_shm_ptr<scalar_t>(
+              thread_ctx->get_swizzled_rank(idx + 1));
+        });
+
+        if (!fast_mode) {
+          thread_ctx->wait_for_all(ThreadSHMContext::check_no_buffer_conflict);
+        }
+
+        memcpy_to_shm(thread_shm_ptr, thread_data_ptr,
+                      data_elem_num * sizeof(scalar_t));
+        thread_ctx->commit_ready_stamp();
+        thread_ctx->wait_for_all(ThreadSHMContext::check_stamp_ready);
+
+        for (int64_t i = 0; i < data_elem_num; ++i) {
+          float acc = static_cast<float>(thread_data_ptr[i]);
+          for (int r = 0; r < RANKS - 1; ++r) {
+            acc += static_cast<float>(remote_data_ptrs[r][i]);
+          }
+          thread_data_ptr[i] = static_cast<scalar_t>(acc);
+        }
+      });
+}
+
 };  // namespace shm_cc_ops
 
 std::vector<std::unique_ptr<SHMManager>> SHMManager::SingletonInstances = {};
 std::mutex SHMManager::SingletonInstancesLock = {};
 
+// Dispatches to the vectorized or scalar implementation at compile time
+// depending on whether the type has a SIMD vector type available.
 template <typename scalar_t>
 void shm_allreduce_sum(ThreadSHMContext* ctx, scalar_t* data, size_t elem_num) {
+  using vec_t = typename KernelVecType<scalar_t>::scalar_vec_t;
+  constexpr bool has_vec = !std::is_same<vec_t, void>::value;
+
   switch (ctx->group_size) {
     case 2:
-      shm_cc_ops::all_reduce_sum_impl<scalar_t, 2>(ctx, data, elem_num);
+      if constexpr (has_vec)
+        shm_cc_ops::all_reduce_sum_impl<scalar_t, 2>(ctx, data, elem_num);
+      else
+        shm_cc_ops::all_reduce_sum_scalar_impl<scalar_t, 2>(ctx, data, elem_num);
       break;
     case 3:
-      shm_cc_ops::all_reduce_sum_impl<scalar_t, 3>(ctx, data, elem_num);
+      if constexpr (has_vec)
+        shm_cc_ops::all_reduce_sum_impl<scalar_t, 3>(ctx, data, elem_num);
+      else
+        shm_cc_ops::all_reduce_sum_scalar_impl<scalar_t, 3>(ctx, data, elem_num);
       break;
     case 4:
-      shm_cc_ops::all_reduce_sum_impl<scalar_t, 4>(ctx, data, elem_num);
+      if constexpr (has_vec)
+        shm_cc_ops::all_reduce_sum_impl<scalar_t, 4>(ctx, data, elem_num);
+      else
+        shm_cc_ops::all_reduce_sum_scalar_impl<scalar_t, 4>(ctx, data, elem_num);
       break;
     case 8:
-      shm_cc_ops::all_reduce_sum_impl<scalar_t, 8>(ctx, data, elem_num);
+      if constexpr (has_vec)
+        shm_cc_ops::all_reduce_sum_impl<scalar_t, 8>(ctx, data, elem_num);
+      else
+        shm_cc_ops::all_reduce_sum_scalar_impl<scalar_t, 8>(ctx, data, elem_num);
       break;
     default:
       TORCH_CHECK(false,
@@ -594,7 +648,7 @@ void shm_gather_impl(ThreadSHMContext* ctx, scalar_t* data, size_t elem_num,
           for (int i = 1; i < worldsize; ++i) {
             int src_rank = thread_ctx->get_swizzled_rank(i);
             scalar_t* src_ptr =
-                thread_ctx->get_thread_shm_ptr<scalar_t>(src_rank);  // shm
+                thread_ctx->get_thread_shm_ptr<scalar_t>(src_rank);
             scalar_t* dst_ptr = outputs[src_rank] + data_offset;
             thread_ctx->wait_for_one(src_rank,
                                      ThreadSHMContext::check_stamp_ready);
@@ -603,8 +657,6 @@ void shm_gather_impl(ThreadSHMContext* ctx, scalar_t* data, size_t elem_num,
           }
         }
       });
-
-  return;
 }
 
 struct MemPiece {
@@ -625,9 +677,7 @@ struct TensorListMeta {
 
   TensorListMeta() : tensor_num(0), total_bytes(0) {
     static_assert(sizeof(TensorListMeta) % 64 == 0);
-    static_assert(sizeof(TensorListMeta) <
-                  MIN_THREAD_PROCESS_SIZE);  // To ensure the metadata always
-                                             // hold by the thread 0
+    static_assert(sizeof(TensorListMeta) < MIN_THREAD_PROCESS_SIZE);
     for (int i = 0; i < MAX_P2P_SEND_TENSOR_NUM; ++i) {
       tensor_bytes[i] = 0;
       tensor_ptrs[i] = nullptr;
@@ -635,7 +685,6 @@ struct TensorListMeta {
     }
   }
 
-  // For send and recv
   void bind_tensor_list(std::vector<torch::Tensor>& tensor_list) {
     TORCH_CHECK(tensor_types[0] == torch::ScalarType::Undefined,
                 "Re-bind TensorListMeta is not allowed.")
@@ -653,7 +702,6 @@ struct TensorListMeta {
     total_bytes = bytes_sum;
   }
 
-  // For recv
   std::vector<torch::Tensor> generate_tensor_list() {
     std::vector<torch::Tensor> tensor_list;
     tensor_list.reserve(tensor_num);

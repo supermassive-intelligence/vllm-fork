@@ -206,7 +206,7 @@ struct VectorizedRegWrapper {
   // Define optimized functions for datatypes passed in __VA_ARGS__
   OPT_TORCH_IMPL(abs, abs, abs, c10::Half, float)
   OPT_TORCH_IMPL(er, erf, erf, float)
-  OPT_TORCH_IMPL(exp, exp, fexp_u20, float)
+  OPT_TORCH_IMPL(exp, exp, exp, float)
   OPT_TORCH_IMPL(exp_u20, exp, exp_u20, float)
   OPT_TORCH_IMPL(sin, sin, sin, float)
   OPT_TORCH_IMPL(sinh, sinh, sinh, float)

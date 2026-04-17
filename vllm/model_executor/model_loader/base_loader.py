@@ -62,6 +62,7 @@ class BaseModelLoader(ABC):
 
             logger.debug("Loading weights on %s ...", load_device)
             self.load_weights(model, model_config)
+            model.model_config = model_config
 
             # Log peak GPU memory after loading weights. This is needed
             # to have test coverage on peak memory for online quantization.
