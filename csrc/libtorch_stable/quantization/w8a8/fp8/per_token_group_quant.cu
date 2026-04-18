@@ -296,7 +296,7 @@ __global__ void per_token_group_quant_8bit_packed_kernel(
                               threads_per_group, y_s, min_8bit, max_8bit);
 }
 
-void per_token_group_quant_8bit_packed(const torch::stable::Tensor& input,
+void per_token_group_quant_8bit_packed(torch::stable::Tensor input,
                                        torch::stable::Tensor output_q,
                                        torch::stable::Tensor output_s_packed,
                                        int64_t group_size, double eps,
@@ -379,7 +379,7 @@ void per_token_group_quant_8bit_packed(const torch::stable::Tensor& input,
 #undef LAUNCH_PACKED_KERNEL
 }
 
-void per_token_group_quant_fp8(const torch::stable::Tensor& input,
+void per_token_group_quant_fp8(torch::stable::Tensor input,
                                torch::stable::Tensor output_q,
                                torch::stable::Tensor output_s,
                                int64_t group_size, double eps, double fp8_min,
