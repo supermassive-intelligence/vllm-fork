@@ -156,6 +156,15 @@ class TokenformerModelManager:
             self.deactivate_all_adapters()
         else:
             for request in lora_requests:
+                # add_dummy_lora is a no-op for tokenformer, so warmup
+                # requests reach here with ids that were never registered.
+                # Skip them instead of asserting in activate_adapter.
+                if request.adapter_id not in self._registered_adapters:
+                    logger.debug(
+                        f"Skipping activation of unregistered adapter "
+                        f"{request.adapter_id} (likely a dummy warmup LoRA)"
+                    )
+                    continue
                 self.activate_adapter(request.adapter_id)
 
     def set_adapter_mapping(self, mapping: Any) -> None:
