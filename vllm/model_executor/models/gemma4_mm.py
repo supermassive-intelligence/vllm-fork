@@ -65,7 +65,13 @@ from vllm.multimodal.processing.processor import (
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsLoRA,
+    SupportsMultiModal,
+    SupportsPP,
+    SupportsTokenformer,
+)
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -848,7 +854,9 @@ class Gemma4MultimodalEmbedder(nn.Module):
     info=Gemma4ProcessingInfo,
     dummy_inputs=Gemma4DummyInputsBuilder,
 )
-class Gemma4ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
+class Gemma4ForConditionalGeneration(
+    nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA, SupportsTokenformer
+):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
