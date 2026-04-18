@@ -133,16 +133,21 @@ class TokenformerAdapter(nn.Module):
         )
 
 
-# Modules inside a multimodal wrapper that are NOT part of the language model.
-# Tokenformer is a language-model post-training adapter; wrapping vision /
-# audio tower MLPs would use the wrong hidden_size and adapt parameters that
-# aren't trained through the text loss.
-_NON_LANGUAGE_SUBMODULE_PREFIXES = (
-    "vision_tower.",
-    "audio_tower.",
-    "embed_vision.",
-    "embed_audio.",
-    "multi_modal_projector.",
+# Path components inside a multimodal wrapper that are NOT part of the
+# language model. Tokenformer is a language-model post-training adapter;
+# wrapping vision / audio tower MLPs would use the wrong hidden_size and
+# adapt parameters that aren't trained through the text loss.
+#
+# Match by path component so HF's `model.<thing>` wrapper prefix doesn't hide
+# them (e.g., "model.vision_tower.encoder.layers.0.mlp" must be excluded).
+_NON_LANGUAGE_PATH_COMPONENTS = frozenset(
+    {
+        "vision_tower",
+        "audio_tower",
+        "embed_vision",
+        "embed_audio",
+        "multi_modal_projector",
+    }
 )
 
 
@@ -153,9 +158,10 @@ class TokenformerSurgeon(ABC):
         self.device = device
 
     def _is_adapter_layer(self, layer_name):
-        if layer_name.startswith(_NON_LANGUAGE_SUBMODULE_PREFIXES):
+        parts = layer_name.split(".")
+        if any(part in _NON_LANGUAGE_PATH_COMPONENTS for part in parts):
             return False
-        return "mlp" in layer_name.split(".")[-1]
+        return "mlp" in parts[-1]
 
     def _recursive_setattr(self, obj, attr, value):
         attr = attr.split(".", 1)
