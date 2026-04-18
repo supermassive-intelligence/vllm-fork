@@ -77,6 +77,7 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
     SupportsQuant,
+    SupportsTokenformer,
 )
 from .utils import (
     AutoWeightsLoader,
@@ -988,6 +989,7 @@ class Gemma4ForConditionalGeneration(
     SupportsLoRA,
     SupportsEagle3,
     SupportsEncoderCudaGraph,
+    SupportsTokenformer,
 ):
     supports_encoder_cudagraph: ClassVar[Literal[True]] = True
     # Gemma4 clamps mm_prefix bidirectional ranges to the sliding window
