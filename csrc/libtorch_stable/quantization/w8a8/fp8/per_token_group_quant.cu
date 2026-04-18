@@ -456,7 +456,7 @@ __global__ void per_token_group_quant_8bit_packed_register_kernel(
 
 // Public entry point: register-resident packed quant kernel.
 // Constraints: group_size == 128 and bf16/fp16 input.
-void per_token_group_quant_8bit_packed(const torch::stable::Tensor& input,
+void per_token_group_quant_8bit_packed(torch::stable::Tensor input,
                                        torch::stable::Tensor output_q,
                                        torch::stable::Tensor output_s_packed,
                                        int64_t group_size, double eps,
@@ -610,7 +610,7 @@ void per_token_group_quant_8bit_packed(const torch::stable::Tensor& input,
 #undef LAUNCH_REG_KERNEL_INST
 }
 
-void per_token_group_quant_fp8(const torch::stable::Tensor& input,
+void per_token_group_quant_fp8(torch::stable::Tensor input,
                                torch::stable::Tensor output_q,
                                torch::stable::Tensor output_s,
                                int64_t group_size, double eps, double fp8_min,
