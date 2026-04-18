@@ -133,6 +133,19 @@ class TokenformerAdapter(nn.Module):
         )
 
 
+# Modules inside a multimodal wrapper that are NOT part of the language model.
+# Tokenformer is a language-model post-training adapter; wrapping vision /
+# audio tower MLPs would use the wrong hidden_size and adapt parameters that
+# aren't trained through the text loss.
+_NON_LANGUAGE_SUBMODULE_PREFIXES = (
+    "vision_tower.",
+    "audio_tower.",
+    "embed_vision.",
+    "embed_audio.",
+    "multi_modal_projector.",
+)
+
+
 class TokenformerSurgeon(ABC):
 
     def __init__(self, model: nn.Module, device: torch.device):
@@ -140,9 +153,9 @@ class TokenformerSurgeon(ABC):
         self.device = device
 
     def _is_adapter_layer(self, layer_name):
-        return (
-            "mlp" in layer_name.split(".")[-1]
-        )
+        if layer_name.startswith(_NON_LANGUAGE_SUBMODULE_PREFIXES):
+            return False
+        return "mlp" in layer_name.split(".")[-1]
 
     def _recursive_setattr(self, obj, attr, value):
         attr = attr.split(".", 1)
@@ -151,6 +164,20 @@ class TokenformerSurgeon(ABC):
         else:
             self._recursive_setattr(getattr(obj, attr[0]), attr[1], value)
 
+    def _get_language_hidden_size(self):
+        """Resolve the language model's hidden_size, tolerating multimodal
+        configs that nest the text config under `text_config`."""
+        if hasattr(self.model, "config"):
+            cfg = self.model.config
+            text_cfg = getattr(cfg, "text_config", None)
+            if text_cfg is not None and hasattr(text_cfg, "hidden_size"):
+                return text_cfg.hidden_size
+            if hasattr(cfg, "hidden_size"):
+                return cfg.hidden_size
+        if hasattr(self.model, "model_config"):
+            return self.model.model_config.hidden_size
+        return None
+
     def update_layer(self, name, layer):
         """Try to wrap the layer with a TokenformerAdapter."""
         if not self._is_adapter_layer(name):
@@ -158,12 +185,9 @@ class TokenformerSurgeon(ABC):
 
         logger.info(f"Wrapping layer {name} with TokenformerAdapter")
 
-        if hasattr(self.model, "config"):
-            hidden_size = self.model.config.hidden_size
-        elif hasattr(self.model, "model_config"):
-            hidden_size = self.model.model_config.hidden_size
-        else:
-            logger.error("Model does not have config or model_config attribute")
+        hidden_size = self._get_language_hidden_size()
+        if hidden_size is None:
+            logger.error("Model does not expose a language hidden_size")
             return
 
         # Wrap the layer with a TokenformerAdapter
