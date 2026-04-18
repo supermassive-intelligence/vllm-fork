@@ -73,6 +73,7 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
     SupportsQuant,
+    SupportsTokenformer,
 )
 from .utils import (
     AutoWeightsLoader,
@@ -977,6 +978,7 @@ class Gemma4ForConditionalGeneration(
     SupportsPP,
     SupportsLoRA,
     SupportsEagle3,
+    SupportsTokenformer,
 ):
     # Gemma4 clamps mm_prefix bidirectional ranges to the sliding window
     # in-kernel (HF's (causal OR blockwise) AND sliding_window). The model
