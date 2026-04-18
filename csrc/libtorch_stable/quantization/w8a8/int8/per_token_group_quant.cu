@@ -2,7 +2,7 @@
 
 #include "libtorch_stable/quantization/w8a8/per_token_group_quant_8bit.h"
 
-void per_token_group_quant_int8(const torch::stable::Tensor& input,
+void per_token_group_quant_int8(torch::stable::Tensor input,
                                 torch::stable::Tensor output_q,
                                 torch::stable::Tensor output_s,
                                 int64_t group_size, double eps, double int8_min,
