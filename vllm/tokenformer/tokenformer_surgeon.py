@@ -20,7 +20,13 @@ class TokenformerAdapter(nn.Module):
         self.num_heads = int(os.getenv("TOKENFORMER_NUM_HEADS", "4"))
         self.head_dim = hidden_size // self.num_heads
         self.tokenformer_r = int(os.getenv("TOKENFORMER_R", "32"))
-        self.dtype = next(layer.parameters()).dtype
+        # Use a floating-point dtype so parameters can carry gradients. Under
+        # quantized loading (e.g. NVFP4) the base layer's weight dtype is an
+        # integer packed type, which would make `nn.Parameter(requires_grad=True)`
+        # fail with "Only Tensors of floating point and complex dtype can
+        # require gradients". Fall back to float32 if the layer dtype is usable.
+        layer_dtype = next(layer.parameters()).dtype
+        self.dtype = layer_dtype if layer_dtype.is_floating_point else torch.bfloat16
 
         self.tokenformer_k = nn.Parameter(
             torch.zeros(
