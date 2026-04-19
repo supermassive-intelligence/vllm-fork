@@ -34,7 +34,11 @@ try:
             def get(self):
                 """Return the actual allocation function."""
                 def torch_alloc_fn(size, alignment, stream):
-                    return torch.cuda.caching_allocator_alloc(size, stream)
+                    # Fix for multi-GPU tensor parallelism: ensure we're on the correct device
+                    # to avoid "Overflow when unpacking DeviceIndex" error
+                    device = torch.cuda.current_device()
+                    with torch.cuda.device(device):
+                        return torch.cuda.caching_allocator_alloc(size, device)
                 return torch_alloc_fn
         
         # Set the global allocator
