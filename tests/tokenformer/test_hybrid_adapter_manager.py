@@ -160,6 +160,14 @@ def test_add_dummy_lora_forwards_rank(patched_manager):
     fake_tk.add_dummy_lora.assert_called_once_with(req, rank=4)
 
 
+def test_list_adapters_normalizes_tokenformer_dict(patched_manager):
+    mgr, fake_tk = patched_manager
+    # TokenformerModelManager.list_adapters returns a dict — the hybrid
+    # manager must coerce it to a set.
+    fake_tk.list_adapters.return_value = {1: object(), 2: object()}
+    assert mgr.list_adapters() == {1, 2}
+
+
 def test_supports_tower_connector_lora_is_false(patched_manager):
     mgr, _ = patched_manager
     assert mgr.supports_tower_connector_lora() is False
@@ -263,6 +271,52 @@ def test_set_active_adapters_fans_out(full_manager):
     mgr.set_active_adapters(requests, mapping)
     fake_tk.set_active_adapters.assert_called_once_with(requests, mapping)
     fake_lora.set_active_adapters.assert_called_once_with(requests, mapping)
+
+
+def test_add_dummy_lora_fans_out_when_lora_present(full_manager):
+    mgr, fake_tk, fake_lora, _ = full_manager
+    req = SimpleNamespace(adapter_id=0, lora_path="/dummy")
+    mgr.add_dummy_lora(req, rank=8)
+    # Both sub-managers must see the dummy — the LoRA one for
+    # cudagraph capture, the Tokenformer one for interface symmetry.
+    fake_tk.add_dummy_lora.assert_called_once_with(req, rank=8)
+    fake_lora.add_dummy_lora.assert_called_once_with(req, rank=8)
+
+
+def test_list_adapters_unions_both(full_manager):
+    mgr, fake_tk, fake_lora, _ = full_manager
+    fake_tk.list_adapters.return_value = {1: object(), 3: object()}
+    fake_lora.list_adapters.return_value = {2, 3}  # id 3 overlaps
+    assert mgr.list_adapters() == {1, 2, 3}
+
+
+def test_pin_adapter_routes_by_kind(full_manager, monkeypatch):
+    mgr, fake_tk, fake_lora, _ = full_manager
+    import vllm.tokenformer.hybrid_adapter_manager as mod
+
+    # Register a lora and a tokenformer adapter.
+    monkeypatch.setattr(
+        mod, "load_adapter_from_pt", lambda _p: _fake_loaded("tokenformer")
+    )
+    mgr.add_adapter(SimpleNamespace(adapter_id=10, lora_path="/t"))
+    monkeypatch.setattr(
+        mod, "load_adapter_from_pt", lambda _p: _fake_loaded("lora")
+    )
+    mgr.add_adapter(SimpleNamespace(adapter_id=20, lora_path="/l"))
+
+    fake_tk.pin_adapter.reset_mock()
+    fake_lora.pin_adapter.reset_mock()
+
+    mgr.pin_adapter(10)
+    fake_tk.pin_adapter.assert_called_once_with(10)
+    fake_lora.pin_adapter.assert_not_called()
+
+    fake_tk.pin_adapter.reset_mock()
+    fake_lora.pin_adapter.reset_mock()
+
+    mgr.pin_adapter(20)
+    fake_lora.pin_adapter.assert_called_once_with(20)
+    fake_tk.pin_adapter.assert_not_called()
 
 
 def test_remove_all_clears_both(full_manager, monkeypatch):
