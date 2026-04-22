@@ -27,6 +27,30 @@ InputBatch: TypeAlias = TPUInputBatch | GPUInputBatch
 logger = init_logger(__name__)
 
 
+_AdapterKind: TypeAlias = "str"  # "lora" | "tokenformer" | "hybrid"
+
+
+def _select_adapter_kind(lora_config: LoRAConfig | None) -> _AdapterKind:
+    """Classify which adapter manager the runner should instantiate.
+
+    The runner only reaches `load_lora_model` when `lora_config is not None`,
+    i.e. at least one of `enable_lora` / `enable_tokenformer` was set.
+    """
+    if lora_config is None:
+        # Defensive: load_lora_model shouldn't be called without a config,
+        # but fall back to the historical behavior if it ever is.
+        return "tokenformer"
+    lora = lora_config.enable_lora
+    tk = lora_config.enable_tokenformer
+    if lora and tk:
+        return "hybrid"
+    if tk:
+        return "tokenformer"
+    # Either enable_lora was True, or (defensively) neither flag is set but
+    # we still have a lora_config — treat both as the lora path.
+    return "lora"
+
+
 # Defined as a mixin for GPUModelRunner
 class LoRAModelRunnerMixin:
     def load_lora_model(
@@ -39,11 +63,38 @@ class LoRAModelRunnerMixin:
             raise ValueError(
                 f"{model.__class__.__name__} does not support LoRA yet.")
 
-        self.lora_manager = TokenformerModelManager(model=model,
-                                                    device=device)
+        lora_config = vllm_config.lora_config
+        kind = _select_adapter_kind(lora_config)
 
-        logger.info("Created LoRA manager for model "
-                    f"{model.__class__.__name__} with device {device}.")
+        if kind == "tokenformer":
+            self.lora_manager = TokenformerModelManager(
+                model=model, device=device
+            )
+            logger.info(
+                "Created TokenformerModelManager for model %s on device %s.",
+                model.__class__.__name__, device,
+            )
+        elif kind == "lora":
+            # Not yet wired: the real LoRAModelManager lands in a later step.
+            # For now, fall back to TokenformerModelManager so existing
+            # --enable-lora deployments keep working, and emit a deprecation
+            # warning so operators know to migrate.
+            logger.warning(
+                "--enable-lora without --enable-tokenformer currently still "
+                "instantiates the Tokenformer manager. This back-compat "
+                "behavior will be removed in a future release; switch to "
+                "--enable-tokenformer if you mean to serve Tokenformer "
+                "adapters. See docs/design/hybrid_lora_tokenformer.md."
+            )
+            self.lora_manager = TokenformerModelManager(
+                model=model, device=device
+            )
+        else:  # "hybrid"
+            raise NotImplementedError(
+                "Both --enable-lora and --enable-tokenformer were set, but "
+                "hybrid mode is not implemented yet. Set only one for now. "
+                "See docs/design/hybrid_lora_tokenformer.md for the plan."
+            )
 
         return self.lora_manager.model
 
