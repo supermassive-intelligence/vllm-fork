@@ -27,8 +27,25 @@ LoRAExtraVocabSize = Literal[256, 512]
 
 @config(config=ConfigDict(arbitrary_types_allowed=True))
 class LoRAConfig:
-    """Configuration for LoRA."""
+    """Configuration for LoRA (and, in ScalarLM, Tokenformer) adapters.
 
+    The adapter subsystem is enabled if either `enable_lora` or
+    `enable_tokenformer` is set on the engine args; both select this same
+    config object. Fields like `max_loras`, `max_lora_rank`, and `lora_dtype`
+    apply to the tokenformer manager as well.
+    """
+
+    enable_lora: bool = False
+    """Mirror of EngineArgs.enable_lora. When True, the LoRA manager will
+    be instantiated by the runner. Exposed on this config so the runtime
+    can distinguish lora-only / tokenformer-only / hybrid without having
+    to carry EngineArgs around. See
+    `docs/design/hybrid_lora_tokenformer.md`."""
+    enable_tokenformer: bool = False
+    """If True, enable handling of Tokenformer adapters via
+    `TokenformerModelManager`. When both `enable_lora` and
+    `enable_tokenformer` are set, the runner selects the hybrid manager
+    (still under construction — see the design doc for the rollout plan)."""
     max_lora_rank: MaxLoRARanks = 16
     """Max LoRA rank."""
     max_loras: int = Field(default=1, ge=1)

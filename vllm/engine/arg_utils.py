@@ -514,6 +514,7 @@ class EngineArgs:
     mm_tensor_ipc: MMTensorIPC = MultiModalConfig.mm_tensor_ipc
     # LoRA fields
     enable_lora: bool = False
+    enable_tokenformer: bool = LoRAConfig.enable_tokenformer
     max_loras: int = LoRAConfig.max_loras
     max_lora_rank: MaxLoRARanks = LoRAConfig.max_lora_rank
     default_mm_loras: dict[str, str] | None = LoRAConfig.default_mm_loras
@@ -1127,6 +1128,10 @@ class EngineArgs:
             "--enable-lora",
             action=argparse.BooleanOptionalAction,
             help="If True, enable handling of LoRA adapters.",
+        )
+        lora_group.add_argument(
+            "--enable-tokenformer",
+            **lora_kwargs["enable_tokenformer"],
         )
         lora_group.add_argument("--max-loras", **lora_kwargs["max_loras"])
         lora_group.add_argument("--max-lora-rank", **lora_kwargs["max_lora_rank"])
@@ -1844,6 +1849,8 @@ class EngineArgs:
 
         lora_config = (
             LoRAConfig(
+                enable_lora=self.enable_lora,
+                enable_tokenformer=self.enable_tokenformer,
                 max_lora_rank=self.max_lora_rank,
                 max_loras=self.max_loras,
                 default_mm_loras=self.default_mm_loras,
@@ -1856,7 +1863,7 @@ class EngineArgs:
                 if self.max_cpu_loras and self.max_cpu_loras > 0
                 else None,
             )
-            if self.enable_lora
+            if (self.enable_lora or self.enable_tokenformer)
             else None
         )
 
