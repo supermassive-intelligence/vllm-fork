@@ -188,13 +188,32 @@ class HybridAdapterManager:
             self._lora.remove_all_adapters()
 
     def pin_adapter(self, adapter_id: int) -> bool:
-        # TokenformerModelManager.pin_adapter is a no-op pass today,
-        # so pinning is a no-op regardless of kind. When the LoRA
-        # sub-manager lands, route LoRA ids to its pin.
+        kind = self._kinds.get(adapter_id)
+        if kind in ("tokenformer", "hybrid"):
+            self._tokenformer.pin_adapter(adapter_id)
+        if kind in ("lora", "hybrid") and self._lora is not None:
+            self._lora.pin_adapter(adapter_id)
         return True
 
-    def list_adapters(self) -> Any:
-        return self._tokenformer.list_adapters()
+    def list_adapters(self) -> set[int]:
+        """Union of adapter ids across both sub-managers.
+
+        TokenformerModelManager returns a `dict[int, Any]`; the LRU
+        LoRA worker manager returns a `set[int]`. Normalize to a set
+        so the union is sensible; hybrid adapters are naturally
+        de-duplicated. Returning a set matches upstream behavior, which
+        is what `LoRAModelRunnerMixin.list_adapters` forwards to API
+        callers.
+        """
+        ids: set[int] = set()
+        tk = self._tokenformer.list_adapters()
+        if tk is not None:
+            ids |= set(tk)  # works for both dict (keys) and set
+        if self._lora is not None:
+            lora = self._lora.list_adapters()
+            if lora is not None:
+                ids |= set(lora)
+        return ids
 
     # --- per-step activation -------------------------------------------
 
@@ -240,12 +259,19 @@ class HybridAdapterManager:
                 yield
 
     def add_dummy_lora(self, lora_request, rank: int = 8) -> bool:
-        # Tokenformer's version is a no-op that exists purely to satisfy
-        # the warmup path. Route dummies to Tokenformer today; once
-        # LoRA is wired, dummies representing LoRA warmup slots will go
-        # to the LoRA sub-manager (its add_dummy_lora actually
-        # registers a rank-N zero adapter at the given slot).
+        """Register the dummy with both sub-managers when both are present.
+
+        Tokenformer's `add_dummy_lora` is a no-op that exists purely to
+        satisfy the warmup path. The LRU LoRA sub-manager, however,
+        actually registers a rank-`rank` zero adapter at a slot — that
+        registration is load-bearing for cudagraph profiling of the
+        LoRA kernels. If we only forward to Tokenformer, the LoRA-side
+        cudagraph capture runs without any dummy in the slots and
+        misses the LoRA path entirely.
+        """
         self._tokenformer.add_dummy_lora(lora_request, rank=rank)
+        if self._lora is not None:
+            self._lora.add_dummy_lora(lora_request, rank=rank)
         return True
 
     # --- misc -----------------------------------------------------------
