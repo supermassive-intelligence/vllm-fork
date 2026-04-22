@@ -23,7 +23,8 @@ See `docs/design/hybrid_lora_tokenformer.md` §4.3.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, TypeAlias
+from pathlib import Path
+from typing import Any, Literal, TypeAlias
 
 AdapterKind: TypeAlias = Literal["tokenformer", "lora", "hybrid"]
 
@@ -111,3 +112,71 @@ def split_adapter_state_dict(state_dict):
         else:
             tokenformer_sd[k] = v
     return tokenformer_sd, lora_sd
+
+
+# --- .pt I/O ------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class LoadedAdapter:
+    """Result of loading and classifying a `.pt` adapter file.
+
+    `tokenformer_sd` and `lora_sd` together partition the raw
+    `model_state_dict`; each may be empty for a pure adapter of the
+    other kind.
+    """
+
+    kind: AdapterKind
+    tokenformer_sd: dict[str, Any]
+    lora_sd: dict[str, Any]
+    source_path: Path
+
+
+def load_adapter_state_dict(
+    model_dir: str | Path,
+    *,
+    map_location: Any = None,
+) -> dict[str, Any]:
+    """Read the `model_state_dict` out of the first `.pt` in `model_dir`.
+
+    torch is imported lazily so this module can be imported on
+    CPU-only / non-ML machines (e.g. doc-build or lint CI).
+    """
+    model_dir = Path(model_dir)
+    files = sorted(model_dir.glob("*.pt"))
+    if not files:
+        raise FileNotFoundError(f"No .pt file found in {model_dir}")
+    checkpoint_file = files[0]
+
+    import torch  # lazy
+    checkpoint = torch.load(checkpoint_file, map_location=map_location)
+    if not isinstance(checkpoint, dict) or "model_state_dict" not in checkpoint:
+        raise ValueError(
+            f"Adapter file {checkpoint_file} has no top-level "
+            f"'model_state_dict' key. Got: "
+            f"{list(checkpoint.keys()) if isinstance(checkpoint, dict) else type(checkpoint).__name__}"
+        )
+    return checkpoint["model_state_dict"]
+
+
+def load_adapter_from_pt(
+    model_dir: str | Path,
+    *,
+    map_location: Any = None,
+) -> LoadedAdapter:
+    """Load + classify + split a `.pt` adapter.
+
+    Raises `FileNotFoundError` if no `.pt` is in `model_dir`,
+    `ValueError` if the file is malformed or contains neither
+    Tokenformer nor LoRA keys.
+    """
+    sd = load_adapter_state_dict(model_dir, map_location=map_location)
+    classification = classify_adapter(sd)
+    kind = classification.kind  # raises ValueError on neither
+    tk_sd, lora_sd = split_adapter_state_dict(sd)
+    return LoadedAdapter(
+        kind=kind,
+        tokenformer_sd=tk_sd,
+        lora_sd=lora_sd,
+        source_path=Path(model_dir).resolve(),
+    )
