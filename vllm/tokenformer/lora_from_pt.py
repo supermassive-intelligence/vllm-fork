@@ -77,24 +77,45 @@ def build_peft_helper_from_pt(
     lora_alpha: int | None = None,
     lora_alpha_multiplier: float = 2.0,
     use_rslora: bool = False,
+    metadata: dict[str, Any] | None = None,
 ) -> PEFTHelper:
     """Construct a minimal `PEFTHelper` from a LoRA-only state dict slice.
 
     `.pt` adapters don't carry the sidecar `adapter_config.json` that
     PEFT ships with, so we infer what we can from tensor shapes and
-    fall back to sensible defaults for everything else.
+    accept the rest via either an explicit kwarg or a `metadata` dict
+    embedded in the `.pt` file.
 
-    - `r` is inferred via `infer_lora_rank`.
-    - `lora_alpha` defaults to `rank * lora_alpha_multiplier` (most
-      PEFT recipes use 2x). Callers that know the training-time alpha
-      (e.g. read from a sidecar) should pass it explicitly.
-    - `target_modules` is left empty — vLLM's loader doesn't need it
-      at tensor-construction time; packing is driven by the model's
-      `packed_modules_mapping` at a later stage.
+    Resolution order for `lora_alpha` / `use_rslora`:
+      1. Explicit kwarg (takes precedence so tests stay deterministic).
+      2. Value in `metadata` (what the trainer wrote into the `.pt`).
+      3. Default (`rank * lora_alpha_multiplier`, `use_rslora=False`).
+
+    A warning is logged when the default is used — silently guessing
+    alpha would produce a LoRA delta that's the wrong strength.
     """
     r = infer_lora_rank(lora_sd)
+    metadata = metadata or {}
+
     if lora_alpha is None:
-        lora_alpha = int(r * lora_alpha_multiplier)
+        meta_alpha = metadata.get("lora_alpha")
+        if meta_alpha is not None:
+            lora_alpha = int(meta_alpha)
+        else:
+            lora_alpha = int(r * lora_alpha_multiplier)
+            logger.warning(
+                "LoRA adapter has no `lora_alpha` in its metadata; "
+                "defaulting to rank * %g = %d. If the adapter was trained "
+                "with a different alpha the delta will be mis-scaled. "
+                "Bake `lora_alpha` into the .pt metadata dict to silence "
+                "this warning.",
+                lora_alpha_multiplier, lora_alpha,
+            )
+
+    # use_rslora explicit arg wins; otherwise honor metadata; otherwise default.
+    if not use_rslora:
+        use_rslora = bool(metadata.get("use_rslora", False))
+
     return PEFTHelper(
         r=r,
         lora_alpha=lora_alpha,
@@ -111,6 +132,7 @@ def load_lora_model_from_pt(
     dtype: "torch.dtype | None" = None,
     model_vocab_size: int | None = None,
     peft_helper: PEFTHelper | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> LoRAModel:
     """Build a `LoRAModel` from a LoRA-only `.pt` state-dict slice.
 
@@ -118,13 +140,13 @@ def load_lora_model_from_pt(
     into its tokenformer and lora halves via
     `adapter_format.split_adapter_state_dict` before calling this.
 
-    If `peft_helper` is None, one is inferred from tensor shapes via
-    `build_peft_helper_from_pt`.
+    If `peft_helper` is None, one is built from tensor shapes +
+    metadata via `build_peft_helper_from_pt`.
     """
     if not lora_sd:
         raise ValueError("lora_sd is empty — nothing to load.")
     if peft_helper is None:
-        peft_helper = build_peft_helper_from_pt(lora_sd)
+        peft_helper = build_peft_helper_from_pt(lora_sd, metadata=metadata)
     logger.info(
         "Loading LoRA adapter %s from .pt state-dict slice: "
         "rank=%d, alpha=%d, %d tensors.",
