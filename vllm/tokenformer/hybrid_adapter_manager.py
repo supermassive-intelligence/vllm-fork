@@ -24,14 +24,54 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 from vllm.logger import init_logger
-from vllm.tokenformer.adapter_format import AdapterKind, load_adapter_from_pt
+from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
+from vllm.tokenformer.adapter_format import (
+    AdapterKind,
+    load_adapter_from_pt,
+)
+from vllm.tokenformer.lora_from_pt import load_lora_model_from_pt
 from vllm.tokenformer.tokenformer_model_manager import TokenformerModelManager
 
 if TYPE_CHECKING:
     import torch
     import torch.nn as nn
 
+    from vllm.config import VllmConfig
+    from vllm.lora.lora_model import LoRAModel
+    from vllm.lora.request import LoRARequest
+
 logger = init_logger(__name__)
+
+
+class PTWorkerLoRAManager(LRUCacheWorkerLoRAManager):
+    """LoRA worker manager that loads adapters from ScalarLM's `.pt`
+    format instead of HF PEFT's `adapter_config.json + safetensors`.
+
+    Overrides `_load_adapter` to pull the LoRA half out of a `.pt`
+    state dict via `load_adapter_from_pt` + `load_lora_model_from_pt`.
+    Everything else — slot management, kernel setup, dummy-lora cache
+    — is inherited unchanged.
+    """
+
+    def _load_adapter(self, lora_request: "LoRARequest") -> "LoRAModel":
+        loaded = load_adapter_from_pt(lora_request.lora_path)
+        if not loaded.lora_sd:
+            raise ValueError(
+                f"Adapter at {loaded.source_path} has no LoRA tensors "
+                f"but was routed to the LoRA sub-manager. Check the "
+                f"HybridAdapterManager classification step."
+            )
+        return load_lora_model_from_pt(
+            loaded.lora_sd,
+            lora_model_id=lora_request.adapter_id,
+            device=self.device,
+            dtype=(
+                self.lora_config.lora_dtype
+                if self.lora_config is not None
+                else None
+            ),
+            model_vocab_size=self.vocab_size,
+        )
 
 
 class HybridAdapterManager:
@@ -47,11 +87,40 @@ class HybridAdapterManager:
         self,
         model: "nn.Module",
         device: "torch.device",
+        vllm_config: "VllmConfig | None" = None,
     ):
+        """Instantiate both sub-managers.
+
+        Load order is LoRA layer replacement first, then the Tokenformer
+        surgeon. This yields the composition:
+
+            base(x) + lora_delta(x)  (inside the MLP block)
+            + tokenformer_delta(x)   (added by the surgeon wrapper)
+
+        When `vllm_config` is None (or `vllm_config.lora_config` is
+        None), the LoRA sub-manager is not instantiated and the
+        hybrid manager behaves like a pure Tokenformer manager — this
+        keeps the skeleton path alive for callers that haven't flipped
+        to hybrid yet.
+        """
+        lora_enabled = (
+            vllm_config is not None and vllm_config.lora_config is not None
+        )
+
+        if lora_enabled:
+            # LoRA sub-manager replaces targeted linears with *WithLoRA
+            # wrappers, returning the transformed model. We then feed
+            # that into the Tokenformer surgeon.
+            self._lora: Any = PTWorkerLoRAManager(
+                vllm_config,
+                device,
+                model.embedding_modules,
+            )
+            model = self._lora.create_lora_manager(model, vllm_config)
+        else:
+            self._lora = None
+
         self._tokenformer = TokenformerModelManager(model=model, device=device)
-        # LoRA sub-manager placeholder. Will be instantiated alongside the
-        # Tokenformer one once the LoRA-from-.pt loader (option C) lands.
-        self._lora: Any = None
         # adapter_id -> AdapterKind, so remove/activate can route correctly.
         self._kinds: dict[int, AdapterKind] = {}
 
@@ -70,24 +139,39 @@ class HybridAdapterManager:
     # --- adapter lifecycle ---------------------------------------------
 
     def add_adapter(self, lora_request) -> bool:
+        """Classify the adapter, then route each half to its sub-manager.
+
+        A hybrid adapter's Tokenformer tensors go to the Tokenformer
+        manager; its LoRA tensors go to the LoRA manager. Both halves
+        share the same adapter id. `activate`/`set_active_adapters` use
+        `self._kinds` to fan out correctly.
+
+        The sub-managers each re-load the `.pt` file from disk. This is
+        redundant (we already classified once) but keeps their existing
+        interfaces intact. Phase 2 isn't perf-sensitive; we'll tighten
+        this in a later step by passing pre-split dicts through.
+        """
         loaded = load_adapter_from_pt(lora_request.lora_path)
         kind = loaded.kind
         self._kinds[lora_request.adapter_id] = kind
 
-        if kind == "tokenformer":
-            # TokenformerModelManager.add_adapter re-loads the file
-            # itself. That's a redundant torch.load call since we just
-            # did one in load_adapter_from_pt, but the correctness
-            # story is clean and phase 2 isn't perf-sensitive. We'll
-            # tighten this to pass the pre-loaded dict through in a
-            # later step.
-            return self._tokenformer.add_adapter(lora_request)
+        # Tokenformer half.
+        if kind in ("tokenformer", "hybrid"):
+            self._tokenformer.add_adapter(lora_request)
 
-        raise NotImplementedError(
-            f"Adapter {lora_request.adapter_id} at {loaded.source_path} "
-            f"has kind '{kind}', but LoRA and hybrid handling are not "
-            f"wired yet. See docs/design/hybrid_lora_tokenformer.md."
-        )
+        # LoRA half.
+        if kind in ("lora", "hybrid"):
+            if self._lora is None:
+                raise RuntimeError(
+                    f"Adapter {lora_request.adapter_id} at "
+                    f"{loaded.source_path} contains LoRA tensors, but the "
+                    f"HybridAdapterManager was constructed without a "
+                    f"LoRA-enabled vllm_config. Pass "
+                    f"--enable-lora alongside --enable-tokenformer."
+                )
+            self._lora.add_adapter(lora_request)
+
+        return True
 
     def remove_adapter(self, adapter_id: int) -> bool:
         kind = self._kinds.pop(adapter_id, "tokenformer")
@@ -115,10 +199,18 @@ class HybridAdapterManager:
     # --- per-step activation -------------------------------------------
 
     def set_active_adapters(self, lora_requests, lora_mapping) -> None:
-        # Phase 2 skeleton: every registered id is Tokenformer, so
-        # forward wholesale. When LoRA ids coexist, we'll partition
-        # `lora_requests` by `self._kinds[id]` and route each half.
+        """Fan out to both sub-managers.
+
+        Both managers see the full request set so hybrid adapters
+        (whose id is in both managers' registries) are activated in both
+        places. Each sub-manager is expected to skip ids it doesn't own
+        — Tokenformer uses the skip-unregistered guard we added in
+        6529423ba, and the LRU LoRA manager already no-ops on unknown
+        ids via `list_adapters` membership checks.
+        """
         self._tokenformer.set_active_adapters(lora_requests, lora_mapping)
+        if self._lora is not None:
+            self._lora.set_active_adapters(lora_requests, lora_mapping)
 
     def activate_adapter(self, adapter_id: int) -> bool:
         kind = self._kinds.get(adapter_id, "tokenformer")
