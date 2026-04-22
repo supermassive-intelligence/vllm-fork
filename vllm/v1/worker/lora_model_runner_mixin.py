@@ -74,29 +74,28 @@ class LoRAModelRunnerMixin:
                 "Created TokenformerModelManager for model %s on device %s.",
                 model.__class__.__name__, device,
             )
-        elif kind == "lora":
-            # Not yet wired: the real LoRAModelManager lands in a later step.
-            # For now, fall back to TokenformerModelManager so existing
-            # --enable-lora deployments keep working, and emit a deprecation
-            # warning so operators know to migrate.
-            logger.warning(
-                "--enable-lora without --enable-tokenformer currently still "
-                "instantiates the Tokenformer manager. This back-compat "
-                "behavior will be removed in a future release; switch to "
-                "--enable-tokenformer if you mean to serve Tokenformer "
-                "adapters. See docs/design/hybrid_lora_tokenformer.md."
-            )
-            self.lora_manager = TokenformerModelManager(
-                model=model, device=device
-            )
-        else:  # "hybrid"
-            raise NotImplementedError(
-                "Both --enable-lora and --enable-tokenformer were set, but "
-                "hybrid mode is not implemented yet. Set only one for now. "
-                "See docs/design/hybrid_lora_tokenformer.md for the plan."
-            )
+            return self.lora_manager.model
 
-        return self.lora_manager.model
+        if kind == "lora":
+            self.lora_manager = LRUCacheWorkerLoRAManager(
+                vllm_config,
+                device,
+                model.embedding_modules,
+            )
+            logger.info(
+                "Created LRUCacheWorkerLoRAManager for model %s on device %s. "
+                "If you intended to serve Tokenformer adapters, use "
+                "--enable-tokenformer instead of --enable-lora.",
+                model.__class__.__name__, device,
+            )
+            return self.lora_manager.create_lora_manager(model, vllm_config)
+
+        # kind == "hybrid"
+        raise NotImplementedError(
+            "Both --enable-lora and --enable-tokenformer were set, but "
+            "hybrid mode is not implemented yet. Set only one for now. "
+            "See docs/design/hybrid_lora_tokenformer.md for the plan."
+        )
 
 
     def _set_active_loras(
