@@ -18,6 +18,7 @@ from vllm.lora.layers import LoRAMapping, LoRAMappingType
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.models import supports_lora
+from vllm.tokenformer.hybrid_adapter_manager import HybridAdapterManager
 from vllm.tokenformer.tokenformer_model_manager import TokenformerModelManager
 from vllm.v1.worker.gpu_input_batch import InputBatch as GPUInputBatch
 from vllm.v1.worker.tpu_input_batch import InputBatch as TPUInputBatch
@@ -91,11 +92,16 @@ class LoRAModelRunnerMixin:
             return self.lora_manager.create_lora_manager(model, vllm_config)
 
         # kind == "hybrid"
-        raise NotImplementedError(
-            "Both --enable-lora and --enable-tokenformer were set, but "
-            "hybrid mode is not implemented yet. Set only one for now. "
-            "See docs/design/hybrid_lora_tokenformer.md for the plan."
+        self.lora_manager = HybridAdapterManager(
+            model=model,
+            device=device,
+            vllm_config=vllm_config,
         )
+        logger.info(
+            "Created HybridAdapterManager for model %s on device %s.",
+            model.__class__.__name__, device,
+        )
+        return self.lora_manager.model
 
 
     def _set_active_loras(
