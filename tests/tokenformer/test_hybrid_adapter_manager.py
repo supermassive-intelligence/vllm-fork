@@ -69,7 +69,11 @@ def test_add_tokenformer_adapter_delegates(patched_manager, monkeypatch):
 
 
 @pytest.mark.parametrize("kind", ["lora", "hybrid"])
-def test_add_lora_or_hybrid_raises_for_now(patched_manager, monkeypatch, kind):
+def test_add_lora_or_hybrid_without_lora_submanager_raises(
+    patched_manager, monkeypatch, kind
+):
+    """Skeleton path (no vllm_config → self._lora is None) rejects LoRA
+    adapters with a clear message pointing at the missing flag."""
     mgr, _ = patched_manager
     import vllm.tokenformer.hybrid_adapter_manager as mod
     monkeypatch.setattr(
@@ -77,7 +81,7 @@ def test_add_lora_or_hybrid_raises_for_now(patched_manager, monkeypatch, kind):
         lambda _p: _fake_loaded(kind),
     )
     req = SimpleNamespace(adapter_id=9, lora_path="/tmp/a")
-    with pytest.raises(NotImplementedError, match=kind):
+    with pytest.raises(RuntimeError, match="enable-lora"):
         mgr.add_adapter(req)
 
 
@@ -159,3 +163,118 @@ def test_add_dummy_lora_forwards_rank(patched_manager):
 def test_supports_tower_connector_lora_is_false(patched_manager):
     mgr, _ = patched_manager
     assert mgr.supports_tower_connector_lora() is False
+
+
+# --- LoRA-wired path (skeleton with both sub-managers) ----------------
+
+
+@pytest.fixture
+def full_manager(monkeypatch):
+    """HybridAdapterManager with BOTH sub-managers mocked.
+
+    Simulates what happens when load_lora_model constructs the hybrid
+    manager with a vllm_config that has lora_config set — both halves
+    are wired but neither touches real model weights.
+    """
+    import vllm.tokenformer.hybrid_adapter_manager as mod
+
+    fake_tk = MagicMock()
+    fake_tk.model = SimpleNamespace(name="tk-wrapped")
+
+    @contextmanager
+    def _dummy_cache():
+        yield
+    fake_tk.dummy_lora_cache.side_effect = _dummy_cache
+
+    fake_lora = MagicMock()
+    # After the LoRA manager wraps the model, create_lora_manager
+    # returns the further-wrapped model that Tokenformer will see.
+    lora_wrapped = SimpleNamespace(
+        name="lora-wrapped",
+        embedding_modules={},
+    )
+    fake_lora.create_lora_manager.return_value = lora_wrapped
+
+    monkeypatch.setattr(
+        mod, "TokenformerModelManager", lambda model, device: fake_tk
+    )
+    monkeypatch.setattr(
+        mod, "PTWorkerLoRAManager",
+        lambda vllm_config, device, embedding_modules: fake_lora,
+    )
+
+    # Vllm config stub that looks "LoRA-enabled".
+    vllm_config = SimpleNamespace(lora_config=SimpleNamespace())
+    base_model = SimpleNamespace(embedding_modules={})
+
+    mgr = mod.HybridAdapterManager(
+        model=base_model, device="cpu", vllm_config=vllm_config,
+    )
+    return mgr, fake_tk, fake_lora, lora_wrapped
+
+
+def test_hybrid_init_runs_lora_then_tokenformer(full_manager):
+    """The LoRA manager.create_lora_manager is called before the
+    Tokenformer sub-manager sees the model."""
+    _, fake_tk, fake_lora, lora_wrapped = full_manager
+    fake_lora.create_lora_manager.assert_called_once()
+    # Tokenformer sub-manager got instantiated (MagicMock was called).
+    # We can't easily introspect which model it got via the lambda
+    # replacement, but the order is implied: lora_wrapped exists before
+    # the tokenformer call happens in __init__.
+    assert fake_tk is not None
+    assert lora_wrapped.name == "lora-wrapped"
+
+
+def test_add_lora_routes_only_to_lora(full_manager, monkeypatch):
+    mgr, fake_tk, fake_lora, _ = full_manager
+    import vllm.tokenformer.hybrid_adapter_manager as mod
+    monkeypatch.setattr(
+        mod, "load_adapter_from_pt",
+        lambda _p: _fake_loaded("lora"),
+    )
+    req = SimpleNamespace(adapter_id=11, lora_path="/tmp/a")
+    mgr.add_adapter(req)
+
+    fake_lora.add_adapter.assert_called_once_with(req)
+    fake_tk.add_adapter.assert_not_called()
+    assert mgr._kinds[11] == "lora"
+
+
+def test_add_hybrid_routes_to_both(full_manager, monkeypatch):
+    mgr, fake_tk, fake_lora, _ = full_manager
+    import vllm.tokenformer.hybrid_adapter_manager as mod
+    monkeypatch.setattr(
+        mod, "load_adapter_from_pt",
+        lambda _p: _fake_loaded("hybrid"),
+    )
+    req = SimpleNamespace(adapter_id=21, lora_path="/tmp/a")
+    mgr.add_adapter(req)
+
+    fake_lora.add_adapter.assert_called_once_with(req)
+    fake_tk.add_adapter.assert_called_once_with(req)
+    assert mgr._kinds[21] == "hybrid"
+
+
+def test_set_active_adapters_fans_out(full_manager):
+    mgr, fake_tk, fake_lora, _ = full_manager
+    requests = {SimpleNamespace(adapter_id=1)}
+    mapping = object()
+    mgr.set_active_adapters(requests, mapping)
+    fake_tk.set_active_adapters.assert_called_once_with(requests, mapping)
+    fake_lora.set_active_adapters.assert_called_once_with(requests, mapping)
+
+
+def test_remove_all_clears_both(full_manager, monkeypatch):
+    mgr, fake_tk, fake_lora, _ = full_manager
+    import vllm.tokenformer.hybrid_adapter_manager as mod
+    monkeypatch.setattr(
+        mod, "load_adapter_from_pt",
+        lambda _p: _fake_loaded("hybrid"),
+    )
+    mgr.add_adapter(SimpleNamespace(adapter_id=5, lora_path="/tmp/a"))
+    mgr.remove_all_adapters()
+
+    fake_tk.remove_all_adapters.assert_called_once()
+    fake_lora.remove_all_adapters.assert_called_once()
+    assert mgr._kinds == {}
