@@ -170,17 +170,18 @@ def test_split_is_not_destructive():
 
 
 def test_load_adapter_from_pt_dispatches_to_classify_and_split(monkeypatch, tmp_path):
-    """Without torch, mock load_adapter_state_dict to assert the high-level
-    function wires the pure pieces together correctly."""
+    """Without torch, mock the low-level checkpoint reader to assert the
+    high-level function wires the pure pieces together correctly."""
     fake_sd = {
         "model.layers.0.mlp.tokenformer_k": "tk",
         "model.embed_tokens.weight": "emb",
         "model.layers.0.self_attn.q_proj.lora_A.weight": "A",
         "model.layers.0.self_attn.q_proj.lora_B.weight": "B",
     }
+    fake_metadata = {"lora_alpha": 64}
     monkeypatch.setattr(
-        "vllm.tokenformer.adapter_format.load_adapter_state_dict",
-        lambda *a, **kw: fake_sd,
+        "vllm.tokenformer.adapter_format._load_adapter_checkpoint",
+        lambda *a, **kw: (fake_sd, fake_metadata),
     )
     result = load_adapter_from_pt(tmp_path)
     assert isinstance(result, LoadedAdapter)
@@ -194,15 +195,59 @@ def test_load_adapter_from_pt_dispatches_to_classify_and_split(monkeypatch, tmp_
         "model.layers.0.self_attn.q_proj.lora_B.weight",
     }
     assert result.source_path == tmp_path.resolve()
+    assert result.metadata == {"lora_alpha": 64}
 
 
 def test_load_adapter_from_pt_rejects_unrelated_only(monkeypatch, tmp_path):
     monkeypatch.setattr(
-        "vllm.tokenformer.adapter_format.load_adapter_state_dict",
-        lambda *a, **kw: {"model.embed_tokens.weight": "emb"},
+        "vllm.tokenformer.adapter_format._load_adapter_checkpoint",
+        lambda *a, **kw: ({"model.embed_tokens.weight": "emb"}, {}),
     )
     with pytest.raises(ValueError, match="neither tokenformer"):
         load_adapter_from_pt(tmp_path)
+
+
+def test_metadata_defaults_to_empty_dict(monkeypatch, tmp_path):
+    """Older .pt files without a `metadata` key still load, with
+    metadata={} in the result."""
+    fake_sd = {"model.layers.0.mlp.tokenformer_k": "tk"}
+    monkeypatch.setattr(
+        "vllm.tokenformer.adapter_format._load_adapter_checkpoint",
+        lambda *a, **kw: (fake_sd, {}),
+    )
+    result = load_adapter_from_pt(tmp_path)
+    assert result.metadata == {}
+
+
+def test_load_adapter_metadata_real_pt(tmp_path):
+    torch = pytest.importorskip("torch")
+    from vllm.tokenformer.adapter_format import load_adapter_metadata
+
+    sd = {"model.layers.0.mlp.tokenformer_k": torch.zeros(2)}
+    torch.save(
+        {"model_state_dict": sd, "metadata": {"lora_alpha": 32, "use_rslora": True}},
+        tmp_path / "a.pt",
+    )
+    md = load_adapter_metadata(tmp_path)
+    assert md == {"lora_alpha": 32, "use_rslora": True}
+
+
+def test_load_adapter_metadata_missing_returns_empty(tmp_path):
+    torch = pytest.importorskip("torch")
+    from vllm.tokenformer.adapter_format import load_adapter_metadata
+
+    torch.save({"model_state_dict": {"x": torch.zeros(1)}}, tmp_path / "a.pt")
+    assert load_adapter_metadata(tmp_path) == {}
+
+
+def test_metadata_wrong_type_raises(tmp_path):
+    torch = pytest.importorskip("torch")
+    torch.save(
+        {"model_state_dict": {"x": torch.zeros(1)}, "metadata": "not-a-dict"},
+        tmp_path / "a.pt",
+    )
+    with pytest.raises(ValueError, match="metadata"):
+        load_adapter_state_dict(tmp_path)
 
 
 def test_load_adapter_state_dict_missing_file_raises(tmp_path):

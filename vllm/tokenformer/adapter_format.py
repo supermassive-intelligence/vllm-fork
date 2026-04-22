@@ -123,13 +123,16 @@ class LoadedAdapter:
 
     `tokenformer_sd` and `lora_sd` together partition the raw
     `model_state_dict`; each may be empty for a pure adapter of the
-    other kind.
+    other kind. `metadata` holds any optional training-time values the
+    trainer chose to embed (e.g. `lora_alpha`, `use_rslora`) — empty
+    dict if the file predates metadata support.
     """
 
     kind: AdapterKind
     tokenformer_sd: dict[str, Any]
     lora_sd: dict[str, Any]
     source_path: Path
+    metadata: dict[str, Any]
 
 
 def load_adapter_state_dict(
@@ -142,6 +145,31 @@ def load_adapter_state_dict(
     torch is imported lazily so this module can be imported on
     CPU-only / non-ML machines (e.g. doc-build or lint CI).
     """
+    state_dict, _ = _load_adapter_checkpoint(model_dir, map_location=map_location)
+    return state_dict
+
+
+def load_adapter_metadata(
+    model_dir: str | Path,
+    *,
+    map_location: Any = None,
+) -> dict[str, Any]:
+    """Read the optional `metadata` dict from the adapter `.pt`.
+
+    Returns `{}` if the file has no `metadata` key (older adapters).
+    The trainer embeds non-tensor metadata like `lora_alpha` and
+    `use_rslora` here so we can avoid ambiguous defaults on load.
+    """
+    _, metadata = _load_adapter_checkpoint(model_dir, map_location=map_location)
+    return metadata
+
+
+def _load_adapter_checkpoint(
+    model_dir: str | Path,
+    *,
+    map_location: Any = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Lower-level: load the `.pt`, return (model_state_dict, metadata)."""
     model_dir = Path(model_dir)
     files = sorted(model_dir.glob("*.pt"))
     if not files:
@@ -156,7 +184,13 @@ def load_adapter_state_dict(
             f"'model_state_dict' key. Got: "
             f"{list(checkpoint.keys()) if isinstance(checkpoint, dict) else type(checkpoint).__name__}"
         )
-    return checkpoint["model_state_dict"]
+    metadata = checkpoint.get("metadata", {})
+    if not isinstance(metadata, dict):
+        raise ValueError(
+            f"Adapter file {checkpoint_file} has 'metadata' key but it is "
+            f"a {type(metadata).__name__}, expected dict."
+        )
+    return checkpoint["model_state_dict"], metadata
 
 
 def load_adapter_from_pt(
@@ -170,7 +204,9 @@ def load_adapter_from_pt(
     `ValueError` if the file is malformed or contains neither
     Tokenformer nor LoRA keys.
     """
-    sd = load_adapter_state_dict(model_dir, map_location=map_location)
+    sd, metadata = _load_adapter_checkpoint(
+        model_dir, map_location=map_location
+    )
     classification = classify_adapter(sd)
     kind = classification.kind  # raises ValueError on neither
     tk_sd, lora_sd = split_adapter_state_dict(sd)
@@ -179,4 +215,5 @@ def load_adapter_from_pt(
         tokenformer_sd=tk_sd,
         lora_sd=lora_sd,
         source_path=Path(model_dir).resolve(),
+        metadata=metadata,
     )

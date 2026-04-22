@@ -71,6 +71,7 @@ class PTWorkerLoRAManager(LRUCacheWorkerLoRAManager):
                 else None
             ),
             model_vocab_size=self.vocab_size,
+            metadata=loaded.metadata,
         )
 
 
