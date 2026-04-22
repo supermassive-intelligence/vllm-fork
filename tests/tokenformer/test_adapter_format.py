@@ -9,9 +9,12 @@ import pytest
 
 from vllm.tokenformer.adapter_format import (
     AdapterClassification,
+    LoadedAdapter,
     classify_adapter,
     has_lora_keys,
     has_tokenformer_keys,
+    load_adapter_from_pt,
+    load_adapter_state_dict,
     split_adapter_state_dict,
 )
 
@@ -161,3 +164,92 @@ def test_split_is_not_destructive():
     sd_copy = dict(sd)
     _ = split_adapter_state_dict(sd)
     assert sd == sd_copy  # input not mutated
+
+
+# --- .pt loader ---------------------------------------------------------
+
+
+def test_load_adapter_from_pt_dispatches_to_classify_and_split(monkeypatch, tmp_path):
+    """Without torch, mock load_adapter_state_dict to assert the high-level
+    function wires the pure pieces together correctly."""
+    fake_sd = {
+        "model.layers.0.mlp.tokenformer_k": "tk",
+        "model.embed_tokens.weight": "emb",
+        "model.layers.0.self_attn.q_proj.lora_A.weight": "A",
+        "model.layers.0.self_attn.q_proj.lora_B.weight": "B",
+    }
+    monkeypatch.setattr(
+        "vllm.tokenformer.adapter_format.load_adapter_state_dict",
+        lambda *a, **kw: fake_sd,
+    )
+    result = load_adapter_from_pt(tmp_path)
+    assert isinstance(result, LoadedAdapter)
+    assert result.kind == "hybrid"
+    assert set(result.tokenformer_sd) == {
+        "model.layers.0.mlp.tokenformer_k",
+        "model.embed_tokens.weight",
+    }
+    assert set(result.lora_sd) == {
+        "model.layers.0.self_attn.q_proj.lora_A.weight",
+        "model.layers.0.self_attn.q_proj.lora_B.weight",
+    }
+    assert result.source_path == tmp_path.resolve()
+
+
+def test_load_adapter_from_pt_rejects_unrelated_only(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "vllm.tokenformer.adapter_format.load_adapter_state_dict",
+        lambda *a, **kw: {"model.embed_tokens.weight": "emb"},
+    )
+    with pytest.raises(ValueError, match="neither tokenformer"):
+        load_adapter_from_pt(tmp_path)
+
+
+def test_load_adapter_state_dict_missing_file_raises(tmp_path):
+    with pytest.raises(FileNotFoundError, match="No .pt file"):
+        load_adapter_state_dict(tmp_path)
+
+
+# --- real torch round-trip (skipped if torch not installed) -------------
+
+
+def _torch_or_skip():
+    torch = pytest.importorskip("torch")
+    return torch
+
+
+def test_load_adapter_state_dict_real_pt(tmp_path):
+    torch = _torch_or_skip()
+    sd = {
+        "model.layers.0.mlp.tokenformer_k": torch.zeros(4, 4),
+        "model.layers.0.self_attn.q_proj.lora_A.weight": torch.zeros(4, 8),
+    }
+    torch.save({"model_state_dict": sd}, tmp_path / "adapter.pt")
+    loaded = load_adapter_state_dict(tmp_path)
+    assert set(loaded) == set(sd)
+
+
+def test_load_adapter_from_pt_real_pt_hybrid(tmp_path):
+    torch = _torch_or_skip()
+    sd = {
+        "model.layers.0.mlp.tokenformer_p": torch.zeros(4, 4),
+        "model.layers.0.self_attn.q_proj.lora_B.weight": torch.zeros(8, 4),
+        "lm_head.weight": torch.zeros(16, 4),
+    }
+    torch.save({"model_state_dict": sd}, tmp_path / "adapter.pt")
+    result = load_adapter_from_pt(tmp_path)
+    assert result.kind == "hybrid"
+    assert set(result.tokenformer_sd) == {
+        "model.layers.0.mlp.tokenformer_p",
+        "lm_head.weight",
+    }
+    assert set(result.lora_sd) == {
+        "model.layers.0.self_attn.q_proj.lora_B.weight",
+    }
+
+
+def test_load_adapter_rejects_checkpoint_without_model_state_dict(tmp_path):
+    torch = _torch_or_skip()
+    torch.save({"some_other_key": torch.zeros(2)}, tmp_path / "adapter.pt")
+    with pytest.raises(ValueError, match="model_state_dict"):
+        load_adapter_state_dict(tmp_path)
