@@ -43,19 +43,30 @@ _LORA_PATH_SEGMENTS = (
 def normalize_lora_key(key: str) -> str:
     """Normalize a training-side LoRA key to vLLM's expected shape.
 
+    HF's `Gemma4ForConditionalGeneration` nests the text model under
+    `model.language_model.*`; vLLM's Gemma4 loader strips that infix
+    at base-weight load time (`vllm/model_executor/models/gemma4.py`
+    around the `name.replace("language_model.", "")` line) so the
+    running module tree is `model.layers.*`. We mirror that strip so
+    LoRA keys land on the right modules.
+
     ScalarLM's trainer wraps adapters in PEFT's `PeftModel`, which adds
     a `.default.` adapter-name segment, and wraps some linears in
     `Gemma4ClippableLinear` (which adds a `.linear.` segment between
     the module and its LoRA weights). vLLM's parser expects the raw
     shape `...<module>.lora_A.weight` / `...<module>.lora_B.weight`.
 
-    Transformations (idempotent):
+    Transformations (all idempotent):
+      - `model.language_model.` → `model.` (Gemma4 infix)
       - `.lora_A.default.weight` → `.lora_A.weight`
       - `.lora_B.default.weight` → `.lora_B.weight`
       - `.linear.lora_A.weight` → `.lora_A.weight`
       - `.linear.lora_B.weight` → `.lora_B.weight`
     """
-    # Strip PEFT's PeftModel `.default` adapter-name segment first.
+    # Strip Gemma4's language_model infix first so later rules see
+    # already-flattened paths.
+    key = key.replace("model.language_model.", "model.")
+    # Then strip PEFT's PeftModel `.default` adapter-name segment.
     key = key.replace(".lora_A.default.", ".lora_A.")
     key = key.replace(".lora_B.default.", ".lora_B.")
     # Then strip the Gemma4ClippableLinear `.linear` wrapper segment.
