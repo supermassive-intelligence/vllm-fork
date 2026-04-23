@@ -18,7 +18,10 @@ from vllm.lora.layers import LoRAMapping, LoRAMappingType
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.models import supports_lora
-from vllm.tokenformer.hybrid_adapter_manager import HybridAdapterManager
+from vllm.tokenformer.hybrid_adapter_manager import (
+    HybridAdapterManager,
+    PTWorkerLoRAManager,
+)
 from vllm.tokenformer.tokenformer_model_manager import TokenformerModelManager
 from vllm.v1.worker.gpu_input_batch import InputBatch as GPUInputBatch
 from vllm.v1.worker.tpu_input_batch import InputBatch as TPUInputBatch
@@ -78,13 +81,17 @@ class LoRAModelRunnerMixin:
             return self.lora_manager.model
 
         if kind == "lora":
-            self.lora_manager = LRUCacheWorkerLoRAManager(
+            # Use the ScalarLM `.pt`-aware manager (with fallback to
+            # upstream PEFT when no .pt is present), so adapters
+            # produced by the ScalarLM trainer load without users
+            # needing to set --enable-tokenformer too.
+            self.lora_manager = PTWorkerLoRAManager(
                 vllm_config,
                 device,
                 model.embedding_modules,
             )
             logger.info(
-                "Created LRUCacheWorkerLoRAManager for model %s on device %s. "
+                "Created PTWorkerLoRAManager for model %s on device %s. "
                 "If you intended to serve Tokenformer adapters, use "
                 "--enable-tokenformer instead of --enable-lora.",
                 model.__class__.__name__, device,

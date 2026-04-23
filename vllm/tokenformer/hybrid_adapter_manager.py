@@ -44,22 +44,38 @@ logger = init_logger(__name__)
 
 
 class PTWorkerLoRAManager(LRUCacheWorkerLoRAManager):
-    """LoRA worker manager that loads adapters from ScalarLM's `.pt`
-    format instead of HF PEFT's `adapter_config.json + safetensors`.
+    """LoRA worker manager that prefers ScalarLM's `.pt` adapter format
+    but falls back to upstream HF PEFT (`adapter_config.json +
+    adapter_model.safetensors`) when no `.pt` is in the adapter
+    directory.
 
-    Overrides `_load_adapter` to pull the LoRA half out of a `.pt`
-    state dict via `load_adapter_from_pt` + `load_lora_model_from_pt`.
-    Everything else — slot management, kernel setup, dummy-lora cache
-    — is inherited unchanged.
+    Overrides `_load_adapter` only. Slot management, kernel setup, and
+    dummy-lora caching are inherited.
     """
 
     def _load_adapter(self, lora_request: "LoRARequest") -> "LoRAModel":
-        loaded = load_adapter_from_pt(lora_request.lora_path)
+        # Prefer `.pt`. If there's no .pt in the dir, delegate to the
+        # upstream PEFT path so users with standard HF LoRA checkpoints
+        # keep working on the same server.
+        from pathlib import Path
+        from vllm.lora.utils import get_adapter_absolute_path
+
+        lora_path = get_adapter_absolute_path(lora_request.lora_path)
+        pt_files = list(Path(lora_path).glob("*.pt"))
+        if not pt_files:
+            logger.info(
+                "No .pt file in %s; falling back to upstream PEFT loader.",
+                lora_path,
+            )
+            return super()._load_adapter(lora_request)
+
+        loaded = load_adapter_from_pt(lora_path)
         if not loaded.lora_sd:
             raise ValueError(
                 f"Adapter at {loaded.source_path} has no LoRA tensors "
-                f"but was routed to the LoRA sub-manager. Check the "
-                f"HybridAdapterManager classification step."
+                f"(found only Tokenformer keys). Serve with "
+                f"--enable-tokenformer instead, or as a hybrid adapter "
+                f"with both --enable-lora and --enable-tokenformer."
             )
         return load_lora_model_from_pt(
             loaded.lora_sd,
