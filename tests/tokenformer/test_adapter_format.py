@@ -15,6 +15,8 @@ from vllm.tokenformer.adapter_format import (
     has_tokenformer_keys,
     load_adapter_from_pt,
     load_adapter_state_dict,
+    normalize_lora_key,
+    normalize_lora_state_dict,
     split_adapter_state_dict,
 )
 
@@ -136,6 +138,51 @@ def test_split_routes_lora_to_lora_sd():
         "model.layers.0.self_attn.q_proj.lora_A.weight",
         "model.layers.0.self_attn.q_proj.lora_B.weight",
     }
+
+
+def test_split_normalizes_peft_default_segment():
+    """`.lora_A.default.weight` and `.lora_B.default.weight` collapse
+    to vLLM's expected `.lora_A.weight` / `.lora_B.weight`."""
+    sd = {
+        "model.layers.0.self_attn.q_proj.lora_A.default.weight": "A",
+        "model.layers.0.self_attn.q_proj.lora_B.default.weight": "B",
+    }
+    _, lora_sd = split_adapter_state_dict(sd)
+    assert set(lora_sd) == {
+        "model.layers.0.self_attn.q_proj.lora_A.weight",
+        "model.layers.0.self_attn.q_proj.lora_B.weight",
+    }
+
+
+def test_split_strips_clippable_linear_wrapper():
+    """Gemma4ClippableLinear inserts a `.linear.` segment between the
+    module and its LoRA weights; the normalizer must remove it."""
+    sd = {
+        "model.vision_tower.encoder.layers.0.self_attn.q_proj.linear.lora_A.default.weight": "A",
+        "model.vision_tower.encoder.layers.0.mlp.gate_proj.linear.lora_B.default.weight": "B",
+    }
+    _, lora_sd = split_adapter_state_dict(sd)
+    assert set(lora_sd) == {
+        "model.vision_tower.encoder.layers.0.self_attn.q_proj.lora_A.weight",
+        "model.vision_tower.encoder.layers.0.mlp.gate_proj.lora_B.weight",
+    }
+
+
+def test_normalize_is_idempotent():
+    already_normalized = "model.layers.0.self_attn.q_proj.lora_A.weight"
+    assert normalize_lora_key(already_normalized) == already_normalized
+
+
+def test_normalize_collision_raises():
+    # Two training-side keys that normalize to the same target is a
+    # bug upstream of us; fail loudly rather than silently dropping
+    # one.
+    sd = {
+        "q_proj.lora_A.default.weight": "A1",
+        "q_proj.linear.lora_A.weight": "A2",
+    }
+    with pytest.raises(ValueError, match="collision"):
+        normalize_lora_state_dict(sd)
 
 
 def test_split_hybrid():
