@@ -128,40 +128,51 @@ def test_split_routes_tokenformer_and_base_to_tokenformer_sd():
 
 
 def test_split_routes_lora_to_lora_sd():
+    # Input: HF-shaped trainer keys. Output: vLLM module paths after
+    # normalize_lora_key runs inside split_adapter_state_dict.
     sd = {
-        "model.layers.0.self_attn.q_proj.lora_A.weight": "A",
-        "model.layers.0.self_attn.q_proj.lora_B.weight": "B",
+        "model.language_model.layers.0.self_attn.q_proj.lora_A.weight": "A",
+        "model.language_model.layers.0.self_attn.q_proj.lora_B.weight": "B",
     }
     tk_sd, lora_sd = split_adapter_state_dict(sd)
     assert tk_sd == {}
     assert set(lora_sd) == {
-        "model.layers.0.self_attn.q_proj.lora_A.weight",
-        "model.layers.0.self_attn.q_proj.lora_B.weight",
+        "language_model.model.layers.0.self_attn.q_proj.lora_A.weight",
+        "language_model.model.layers.0.self_attn.q_proj.lora_B.weight",
     }
 
 
-def test_normalize_strips_gemma4_language_model_infix():
-    """vLLM's Gemma4 loader strips `language_model.` from base weights
-    (gemma4.py around line 1160); we must do the same for LoRA keys or
-    they land on nonexistent module paths and silently no-op."""
+def test_normalize_swaps_gemma4_language_model_prefix():
+    """vLLM's Gemma4 module tree has `language_model.model.layers.*`
+    (extra `.model.` nesting). HF has `model.language_model.layers.*`.
+    We swap them so LoRA keys land on the right modules.
+    """
     trainer_key = (
         "model.language_model.layers.0.self_attn.q_proj.lora_A.default.weight"
     )
     assert normalize_lora_key(trainer_key) == (
-        "model.layers.0.self_attn.q_proj.lora_A.weight"
+        "language_model.model.layers.0.self_attn.q_proj.lora_A.weight"
     )
 
 
-def test_normalize_handles_clippable_linear_plus_infix():
-    """Vision-tower keys don't have the `language_model.` infix, but
-    they do have the `.linear.` wrapper segment. Make sure stripping
-    one doesn't affect the other."""
+def test_normalize_strips_top_level_model_prefix_for_vision():
+    """Vision tower is at the top level in vLLM — no `model.` prefix.
+    Also verifies the `.linear.` wrapper stripping still runs."""
     trainer_key = (
         "model.vision_tower.encoder.layers.0.self_attn.q_proj"
         ".linear.lora_A.default.weight"
     )
     assert normalize_lora_key(trainer_key) == (
-        "model.vision_tower.encoder.layers.0.self_attn.q_proj.lora_A.weight"
+        "vision_tower.encoder.layers.0.self_attn.q_proj.lora_A.weight"
+    )
+
+
+def test_normalize_strips_top_level_model_prefix_for_embed_vision():
+    trainer_key = (
+        "model.embed_vision.embedding_projection.lora_A.default.weight"
+    )
+    assert normalize_lora_key(trainer_key) == (
+        "embed_vision.embedding_projection.lora_A.weight"
     )
 
 
@@ -169,41 +180,49 @@ def test_normalize_gemma4_mlp_key_from_real_trainer_output():
     """Exact key from the user's training log (2026-04-23)."""
     trainer_key = "model.language_model.layers.0.mlp.gate_proj.lora_A.default.weight"
     assert normalize_lora_key(trainer_key) == (
-        "model.layers.0.mlp.gate_proj.lora_A.weight"
+        "language_model.model.layers.0.mlp.gate_proj.lora_A.weight"
     )
 
 
 def test_split_normalizes_peft_default_segment():
     """`.lora_A.default.weight` and `.lora_B.default.weight` collapse
-    to vLLM's expected `.lora_A.weight` / `.lora_B.weight`."""
+    to vLLM's expected `.lora_A.weight` / `.lora_B.weight`, combined
+    with the model.language_model → language_model.model swap."""
     sd = {
-        "model.layers.0.self_attn.q_proj.lora_A.default.weight": "A",
-        "model.layers.0.self_attn.q_proj.lora_B.default.weight": "B",
+        "model.language_model.layers.0.self_attn.q_proj.lora_A.default.weight": "A",
+        "model.language_model.layers.0.self_attn.q_proj.lora_B.default.weight": "B",
     }
     _, lora_sd = split_adapter_state_dict(sd)
     assert set(lora_sd) == {
-        "model.layers.0.self_attn.q_proj.lora_A.weight",
-        "model.layers.0.self_attn.q_proj.lora_B.weight",
+        "language_model.model.layers.0.self_attn.q_proj.lora_A.weight",
+        "language_model.model.layers.0.self_attn.q_proj.lora_B.weight",
     }
 
 
 def test_split_strips_clippable_linear_wrapper():
     """Gemma4ClippableLinear inserts a `.linear.` segment between the
-    module and its LoRA weights; the normalizer must remove it."""
+    module and its LoRA weights; the normalizer must remove it.
+    vision_tower lives at the top level (no `.model.` swap)."""
     sd = {
         "model.vision_tower.encoder.layers.0.self_attn.q_proj.linear.lora_A.default.weight": "A",
         "model.vision_tower.encoder.layers.0.mlp.gate_proj.linear.lora_B.default.weight": "B",
     }
     _, lora_sd = split_adapter_state_dict(sd)
     assert set(lora_sd) == {
-        "model.vision_tower.encoder.layers.0.self_attn.q_proj.lora_A.weight",
-        "model.vision_tower.encoder.layers.0.mlp.gate_proj.lora_B.weight",
+        "vision_tower.encoder.layers.0.self_attn.q_proj.lora_A.weight",
+        "vision_tower.encoder.layers.0.mlp.gate_proj.lora_B.weight",
     }
 
 
 def test_normalize_is_idempotent():
-    already_normalized = "model.layers.0.self_attn.q_proj.lora_A.weight"
-    assert normalize_lora_key(already_normalized) == already_normalized
+    # Already-normalized keys (in vLLM module shape) pass through
+    # unchanged.
+    for already_normalized in [
+        "language_model.model.layers.0.self_attn.q_proj.lora_A.weight",
+        "vision_tower.encoder.layers.0.mlp.down_proj.lora_B.weight",
+        "embed_vision.embedding_projection.lora_A.weight",
+    ]:
+        assert normalize_lora_key(already_normalized) == already_normalized
 
 
 def test_normalize_collision_raises():
@@ -219,10 +238,12 @@ def test_normalize_collision_raises():
 
 
 def test_split_hybrid():
+    # LoRA inputs are in HF shape and normalize on the way out.
+    # Tokenformer keys don't go through normalize_lora_key.
     sd = {
         "model.layers.0.mlp.tokenformer_k": "tk",
-        "model.layers.0.self_attn.q_proj.lora_A.weight": "A",
-        "model.layers.0.self_attn.q_proj.lora_B.weight": "B",
+        "model.language_model.layers.0.self_attn.q_proj.lora_A.weight": "A",
+        "model.language_model.layers.0.self_attn.q_proj.lora_B.weight": "B",
         "model.embed_tokens.weight": "emb",
     }
     tk_sd, lora_sd = split_adapter_state_dict(sd)
@@ -231,8 +252,8 @@ def test_split_hybrid():
         "model.embed_tokens.weight",
     }
     assert set(lora_sd) == {
-        "model.layers.0.self_attn.q_proj.lora_A.weight",
-        "model.layers.0.self_attn.q_proj.lora_B.weight",
+        "language_model.model.layers.0.self_attn.q_proj.lora_A.weight",
+        "language_model.model.layers.0.self_attn.q_proj.lora_B.weight",
     }
 
 
@@ -255,8 +276,8 @@ def test_load_adapter_from_pt_dispatches_to_classify_and_split(monkeypatch, tmp_
     fake_sd = {
         "model.layers.0.mlp.tokenformer_k": "tk",
         "model.embed_tokens.weight": "emb",
-        "model.layers.0.self_attn.q_proj.lora_A.weight": "A",
-        "model.layers.0.self_attn.q_proj.lora_B.weight": "B",
+        "model.language_model.layers.0.self_attn.q_proj.lora_A.weight": "A",
+        "model.language_model.layers.0.self_attn.q_proj.lora_B.weight": "B",
     }
     fake_metadata = {"lora_alpha": 64}
     monkeypatch.setattr(
@@ -271,8 +292,8 @@ def test_load_adapter_from_pt_dispatches_to_classify_and_split(monkeypatch, tmp_
         "model.embed_tokens.weight",
     }
     assert set(result.lora_sd) == {
-        "model.layers.0.self_attn.q_proj.lora_A.weight",
-        "model.layers.0.self_attn.q_proj.lora_B.weight",
+        "language_model.model.layers.0.self_attn.q_proj.lora_A.weight",
+        "language_model.model.layers.0.self_attn.q_proj.lora_B.weight",
     }
     assert result.source_path == tmp_path.resolve()
     assert result.metadata == {"lora_alpha": 64}
@@ -358,7 +379,7 @@ def test_load_adapter_from_pt_real_pt_hybrid(tmp_path):
     torch = _torch_or_skip()
     sd = {
         "model.layers.0.mlp.tokenformer_p": torch.zeros(4, 4),
-        "model.layers.0.self_attn.q_proj.lora_B.weight": torch.zeros(8, 4),
+        "model.language_model.layers.0.self_attn.q_proj.lora_B.weight": torch.zeros(8, 4),
         "lm_head.weight": torch.zeros(16, 4),
     }
     torch.save({"model_state_dict": sd}, tmp_path / "adapter.pt")
@@ -369,7 +390,7 @@ def test_load_adapter_from_pt_real_pt_hybrid(tmp_path):
         "lm_head.weight",
     }
     assert set(result.lora_sd) == {
-        "model.layers.0.self_attn.q_proj.lora_B.weight",
+        "language_model.model.layers.0.self_attn.q_proj.lora_B.weight",
     }
 
 
