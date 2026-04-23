@@ -88,6 +88,11 @@ class PTWorkerLoRAManager(LRUCacheWorkerLoRAManager):
             ),
             model_vocab_size=self.vocab_size,
             metadata=loaded.metadata,
+            max_lora_rank=(
+                self.lora_config.max_lora_rank
+                if self.lora_config is not None
+                else None
+            ),
         )
         self._warn_on_zero_base_match(lora_model, loaded.source_path)
         return lora_model
