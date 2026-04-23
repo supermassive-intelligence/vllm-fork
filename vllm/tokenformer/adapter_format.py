@@ -43,33 +43,50 @@ _LORA_PATH_SEGMENTS = (
 def normalize_lora_key(key: str) -> str:
     """Normalize a training-side LoRA key to vLLM's expected shape.
 
-    HF's `Gemma4ForConditionalGeneration` nests the text model under
-    `model.language_model.*`; vLLM's Gemma4 loader strips that infix
-    at base-weight load time (`vllm/model_executor/models/gemma4.py`
-    around the `name.replace("language_model.", "")` line) so the
-    running module tree is `model.layers.*`. We mirror that strip so
-    LoRA keys land on the right modules.
+    The ScalarLM trainer exports HF-shaped keys with a
+    Gemma4ForConditionalGeneration + PeftModel + Gemma4ClippableLinear
+    stack, for example:
 
-    ScalarLM's trainer wraps adapters in PEFT's `PeftModel`, which adds
-    a `.default.` adapter-name segment, and wraps some linears in
-    `Gemma4ClippableLinear` (which adds a `.linear.` segment between
-    the module and its LoRA weights). vLLM's parser expects the raw
-    shape `...<module>.lora_A.weight` / `...<module>.lora_B.weight`.
+        model.language_model.layers.0.self_attn.q_proj.lora_A.default.weight
+        model.vision_tower.encoder.layers.0.self_attn.q_proj.linear.lora_A.default.weight
+        model.embed_vision.embedding_projection.lora_A.default.weight
 
-    Transformations (all idempotent):
-      - `model.language_model.` → `model.` (Gemma4 infix)
-      - `.lora_A.default.weight` → `.lora_A.weight`
-      - `.lora_B.default.weight` → `.lora_B.weight`
-      - `.linear.lora_A.weight` → `.lora_A.weight`
-      - `.linear.lora_B.weight` → `.lora_B.weight`
+    vLLM's Gemma4 module tree (verified via `named_modules()` on the
+    deployed model) is:
+
+        language_model.model.layers.<N>...      (extra `.model.` nesting
+                                                  inside language_model)
+        vision_tower.encoder.layers.<N>...      (no leading `model.`)
+        embed_vision.embedding_projection       (no leading `model.`)
+
+    Transformations (applied in order, all idempotent):
+
+      1. Top-level prefix fixup:
+         - `model.language_model.X` → `language_model.model.X`
+           (HF has `.language_model.layers`; vLLM has `.language_model.model.layers`.
+           Swap them.)
+         - `model.X` (any other `model.` prefix) → `X`
+           (HF wraps everything under a top `model.`; vLLM doesn't.)
+
+      2. PEFT PeftModel adapter-name segment:
+         - `.lora_A.default.weight` → `.lora_A.weight`
+         - `.lora_B.default.weight` → `.lora_B.weight`
+
+      3. Gemma4ClippableLinear wrapper segment:
+         - `.linear.lora_A.weight` → `.lora_A.weight`
+         - `.linear.lora_B.weight` → `.lora_B.weight`
     """
-    # Strip Gemma4's language_model infix first so later rules see
-    # already-flattened paths.
-    key = key.replace("model.language_model.", "model.")
-    # Then strip PEFT's PeftModel `.default` adapter-name segment.
+    # Step 1 — fix top-level prefix.
+    if key.startswith("model.language_model."):
+        key = "language_model.model." + key[len("model.language_model."):]
+    elif key.startswith("model."):
+        key = key[len("model."):]
+
+    # Step 2 — strip PEFT's PeftModel `.default` adapter-name segment.
     key = key.replace(".lora_A.default.", ".lora_A.")
     key = key.replace(".lora_B.default.", ".lora_B.")
-    # Then strip the Gemma4ClippableLinear `.linear` wrapper segment.
+
+    # Step 3 — strip the Gemma4ClippableLinear `.linear` wrapper segment.
     key = key.replace(".linear.lora_A.", ".lora_A.")
     key = key.replace(".linear.lora_B.", ".lora_B.")
     return key
