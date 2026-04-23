@@ -140,6 +140,39 @@ def test_split_routes_lora_to_lora_sd():
     }
 
 
+def test_normalize_strips_gemma4_language_model_infix():
+    """vLLM's Gemma4 loader strips `language_model.` from base weights
+    (gemma4.py around line 1160); we must do the same for LoRA keys or
+    they land on nonexistent module paths and silently no-op."""
+    trainer_key = (
+        "model.language_model.layers.0.self_attn.q_proj.lora_A.default.weight"
+    )
+    assert normalize_lora_key(trainer_key) == (
+        "model.layers.0.self_attn.q_proj.lora_A.weight"
+    )
+
+
+def test_normalize_handles_clippable_linear_plus_infix():
+    """Vision-tower keys don't have the `language_model.` infix, but
+    they do have the `.linear.` wrapper segment. Make sure stripping
+    one doesn't affect the other."""
+    trainer_key = (
+        "model.vision_tower.encoder.layers.0.self_attn.q_proj"
+        ".linear.lora_A.default.weight"
+    )
+    assert normalize_lora_key(trainer_key) == (
+        "model.vision_tower.encoder.layers.0.self_attn.q_proj.lora_A.weight"
+    )
+
+
+def test_normalize_gemma4_mlp_key_from_real_trainer_output():
+    """Exact key from the user's training log (2026-04-23)."""
+    trainer_key = "model.language_model.layers.0.mlp.gate_proj.lora_A.default.weight"
+    assert normalize_lora_key(trainer_key) == (
+        "model.layers.0.mlp.gate_proj.lora_A.weight"
+    )
+
+
 def test_split_normalizes_peft_default_segment():
     """`.lora_A.default.weight` and `.lora_B.default.weight` collapse
     to vLLM's expected `.lora_A.weight` / `.lora_B.weight`."""
