@@ -77,7 +77,7 @@ class PTWorkerLoRAManager(LRUCacheWorkerLoRAManager):
                 f"--enable-tokenformer instead, or as a hybrid adapter "
                 f"with both --enable-lora and --enable-tokenformer."
             )
-        return load_lora_model_from_pt(
+        lora_model = load_lora_model_from_pt(
             loaded.lora_sd,
             lora_model_id=lora_request.adapter_id,
             device=self.device,
@@ -88,6 +88,54 @@ class PTWorkerLoRAManager(LRUCacheWorkerLoRAManager):
             ),
             model_vocab_size=self.vocab_size,
             metadata=loaded.metadata,
+        )
+        self._warn_on_zero_base_match(lora_model, loaded.source_path)
+        return lora_model
+
+    def _warn_on_zero_base_match(self, lora_model, source_path) -> None:
+        """If every parsed LoRA module path is missing from the base
+        model, the adapter will silently no-op at activation time (see
+        `LoRAModelManager.activate_adapter` — `module_lora` lookup
+        returns None and the slot is reset). That's the hardest
+        failure to debug because the adapter still "loads". Turn it
+        into a visible WARNING.
+
+        We're permissive: a single match is enough to silence the
+        warning. Partial matches (e.g. vision-tower keys landing on
+        modules we don't support) are expected and benign.
+        """
+        try:
+            base_modules = set(
+                n for n, _ in self._adapter_manager.model.named_modules()
+            )
+        except Exception:
+            # If we can't read the tree (e.g. _adapter_manager not yet
+            # wired during some tests), skip the check silently.
+            return
+
+        lora_modules = set(lora_model.loras.keys()) if hasattr(
+            lora_model, "loras") else set()
+        if not lora_modules:
+            return
+
+        matches = lora_modules & base_modules
+        if matches:
+            return
+
+        # Zero overlap — classic prefix/rename mismatch. Show the
+        # caller a sample from each side so they can eyeball the
+        # transform that's missing.
+        sample_lora = sorted(lora_modules)[:3]
+        sample_base = sorted(
+            m for m in base_modules if "self_attn" in m or "mlp" in m
+        )[:3]
+        logger.warning(
+            "LoRA adapter at %s loaded but NONE of its %d module paths "
+            "match the base model. The adapter will silently have no "
+            "effect at inference. Sample adapter keys: %s. Sample "
+            "base-model modules: %s. Check your trainer-side key "
+            "naming or add a rule to normalize_lora_key.",
+            source_path, len(lora_modules), sample_lora, sample_base,
         )
 
 
