@@ -133,6 +133,7 @@ def load_lora_model_from_pt(
     model_vocab_size: int | None = None,
     peft_helper: PEFTHelper | None = None,
     metadata: dict[str, Any] | None = None,
+    max_lora_rank: int | None = None,
 ) -> LoRAModel:
     """Build a `LoRAModel` from a LoRA-only `.pt` state-dict slice.
 
@@ -142,11 +143,30 @@ def load_lora_model_from_pt(
 
     If `peft_helper` is None, one is built from tensor shapes +
     metadata via `build_peft_helper_from_pt`.
+
+    If `max_lora_rank` is provided, we validate that the adapter's
+    rank fits before handing tensors to vLLM. vLLM pre-allocates
+    stacked LoRA slots sized `max_lora_rank × in_features`; if the
+    adapter rank exceeds that, `set_lora` fails deep in
+    `LoRALayer.copy_(…)` with a cryptic shape mismatch. Catching it
+    here gives operators a clear pointer to `--max-lora-rank`.
     """
     if not lora_sd:
         raise ValueError("lora_sd is empty — nothing to load.")
     if peft_helper is None:
         peft_helper = build_peft_helper_from_pt(lora_sd, metadata=metadata)
+
+    if max_lora_rank is not None and peft_helper.r > max_lora_rank:
+        raise ValueError(
+            f"LoRA adapter {lora_model_id} has rank={peft_helper.r}, which "
+            f"exceeds the server's configured max_lora_rank={max_lora_rank}. "
+            f"vLLM pre-allocates LoRA slots at the configured max, so "
+            f"applying this adapter would silently corrupt tensors. Fix by "
+            f"passing `--max-lora-rank={peft_helper.r}` (or larger — valid "
+            f"values: 1, 8, 16, 32, 64, 128, 256, 320, 512) on the server "
+            f"command line."
+        )
+
     logger.info(
         "Loading LoRA adapter %s from .pt state-dict slice: "
         "rank=%d, alpha=%d, %d tensors.",
