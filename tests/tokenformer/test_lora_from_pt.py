@@ -182,6 +182,21 @@ def test_rslora_scaling_uses_sqrt_of_rank():
 # --- load_lora_model_from_pt -------------------------------------------
 
 
+def test_load_lora_model_rejects_rank_over_max(monkeypatch):
+    """The trainer's rank must be ≤ the server's max_lora_rank.
+    Otherwise vLLM pre-allocated slots are too small and set_lora
+    crashes with a cryptic shape-mismatch. Catch it early with a
+    clear message."""
+    from vllm.tokenformer.lora_from_pt import load_lora_model_from_pt
+
+    sd = {
+        "model.layers.0.self_attn.q_proj.lora_A.weight": _fake_tensor((32, 4096)),
+        "model.layers.0.self_attn.q_proj.lora_B.weight": _fake_tensor((4096, 32)),
+    }
+    with pytest.raises(ValueError, match=r"max_lora_rank=16"):
+        load_lora_model_from_pt(sd, lora_model_id=1, max_lora_rank=16)
+
+
 def test_load_lora_model_from_pt_empty_sd_raises():
     from vllm.tokenformer.lora_from_pt import load_lora_model_from_pt
 
