@@ -40,6 +40,50 @@ _LORA_PATH_SEGMENTS = (
 )
 
 
+def normalize_lora_key(key: str) -> str:
+    """Normalize a training-side LoRA key to vLLM's expected shape.
+
+    ScalarLM's trainer wraps adapters in PEFT's `PeftModel`, which adds
+    a `.default.` adapter-name segment, and wraps some linears in
+    `Gemma4ClippableLinear` (which adds a `.linear.` segment between
+    the module and its LoRA weights). vLLM's parser expects the raw
+    shape `...<module>.lora_A.weight` / `...<module>.lora_B.weight`.
+
+    Transformations (idempotent):
+      - `.lora_A.default.weight` → `.lora_A.weight`
+      - `.lora_B.default.weight` → `.lora_B.weight`
+      - `.linear.lora_A.weight` → `.lora_A.weight`
+      - `.linear.lora_B.weight` → `.lora_B.weight`
+    """
+    # Strip PEFT's PeftModel `.default` adapter-name segment first.
+    key = key.replace(".lora_A.default.", ".lora_A.")
+    key = key.replace(".lora_B.default.", ".lora_B.")
+    # Then strip the Gemma4ClippableLinear `.linear` wrapper segment.
+    key = key.replace(".linear.lora_A.", ".lora_A.")
+    key = key.replace(".linear.lora_B.", ".lora_B.")
+    return key
+
+
+def normalize_lora_state_dict(lora_sd):
+    """Apply `normalize_lora_key` to every key in a state dict slice.
+
+    Returns a new dict; does not mutate the input. If two training
+    keys collapse to the same vLLM key (shouldn't happen in practice
+    since a given linear can only have one lora_A/B), raises.
+    """
+    out: dict = {}
+    for k, v in lora_sd.items():
+        nk = normalize_lora_key(k)
+        if nk in out:
+            raise ValueError(
+                f"LoRA key normalization collision: {k!r} and an earlier "
+                f"key both map to {nk!r}. Training-side keys are "
+                f"ambiguous."
+            )
+        out[nk] = v
+    return out
+
+
 def _leaf(key: str) -> str:
     return key.rsplit(".", 1)[-1]
 
@@ -95,22 +139,28 @@ def split_adapter_state_dict(state_dict):
     """Partition an adapter state dict into (tokenformer_sd, lora_sd).
 
     - Keys whose leaf is `tokenformer_{k,v,p}` go to `tokenformer_sd`.
-    - Keys whose path contains `.lora_A.` or `.lora_B.` go to `lora_sd`.
+    - Keys whose path contains `.lora_A.` or `.lora_B.` go to
+      `lora_sd`, with their names normalized via
+      `normalize_lora_key` (strips PEFT's `.default.` adapter-name
+      segment and any `.linear.` wrapper segment so the keys match
+      vLLM's parser expectations).
     - Other keys (base weight overrides like `embed_tokens.weight`,
       `lm_head.weight`, `input_layernorm.weight`, ...) are treated as
-      Tokenformer base-weight overrides and go to `tokenformer_sd`. This
-      matches today's TokenformerModelManager.activate_adapter behavior
-      where *any* non-LoRA key is copied into the base state dict.
+      Tokenformer base-weight overrides and go to `tokenformer_sd`.
+      This matches today's TokenformerModelManager.activate_adapter
+      behavior where *any* non-LoRA key is copied into the base state
+      dict.
 
     Returns two new dicts; does not mutate the input.
     """
     tokenformer_sd = {}
-    lora_sd = {}
+    lora_sd_raw = {}
     for k, v in state_dict.items():
         if any(seg in k for seg in _LORA_PATH_SEGMENTS):
-            lora_sd[k] = v
+            lora_sd_raw[k] = v
         else:
             tokenformer_sd[k] = v
+    lora_sd = normalize_lora_state_dict(lora_sd_raw)
     return tokenformer_sd, lora_sd
 
 
