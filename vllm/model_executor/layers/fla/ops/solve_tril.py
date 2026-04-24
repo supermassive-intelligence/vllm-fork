@@ -29,15 +29,37 @@ try:
         print(f"[SOLVE_TRIL] Triton version: {triton_actual.__version__}", file=sys.stderr, flush=True)
         print(f"[SOLVE_TRIL] Current allocator: {_allocation._allocator}", file=sys.stderr, flush=True)
         
-        # Create proper allocator class for Triton 3.x
+        # Allocator wrapper compatible with Triton 3.x's _allocator
+        # ContextVar-like interface. We replace `_allocation._allocator`
+        # directly rather than going through `triton.set_allocator` so
+        # the allocator sticks for the whole process (set_allocator
+        # writes to a ContextVar and can be lost across contexts).
+        #
+        # The wrapper must expose .get() / .set() / __call__ because:
+        #   - Triton's nvidia/amd drivers call `allocator.get()` at
+        #     kernel-launch time to obtain the alloc function.
+        #   - `triton.set_allocator(fn)` (called from
+        #     triton.language.core during kernel init) does
+        #     `_allocator.set(fn)` — so .set() has to exist or we crash
+        #     with "TorchAllocator object has no attribute 'set'".
+        #   - Some launch paths may treat the object itself as the alloc
+        #     callable, so __call__ delegates to the current fn.
         class TorchAllocator:
-            def get(self):
-                """Return the actual allocation function."""
+            def __init__(self) -> None:
                 def torch_alloc_fn(size, alignment, stream):
                     return torch.cuda.caching_allocator_alloc(size, stream)
-                return torch_alloc_fn
-        
-        # Set the global allocator
+                self._alloc_fn = torch_alloc_fn
+
+            def get(self):
+                return self._alloc_fn
+
+            def set(self, new_alloc) -> None:
+                self._alloc_fn = new_alloc
+
+            def __call__(self, size, alignment, stream):
+                return self._alloc_fn(size, alignment, stream)
+
+        # Install as the global allocator.
         _allocation._allocator = TorchAllocator()
         
         print(f"[SOLVE_TRIL] Set allocator to: {_allocation._allocator}", file=sys.stderr, flush=True)
