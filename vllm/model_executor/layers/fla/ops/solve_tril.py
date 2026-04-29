@@ -35,19 +35,38 @@ try:
         # the allocator sticks for the whole process (set_allocator
         # writes to a ContextVar and can be lost across contexts).
         #
-        # The wrapper must expose .get() / .set() / __call__ because:
-        #   - Triton's nvidia/amd drivers call `allocator.get()` at
-        #     kernel-launch time to obtain the alloc function.
-        #   - `triton.set_allocator(fn)` (called from
-        #     triton.language.core during kernel init) does
-        #     `_allocator.set(fn)` — so .set() has to exist or we crash
-        #     with "TorchAllocator object has no attribute 'set'".
-        #   - Some launch paths may treat the object itself as the alloc
-        #     callable, so __call__ delegates to the current fn.
+        # Two requirements on the wrapper, both observed in production:
+        #
+        # 1. The class must expose .get() / .set() / __call__ because:
+        #      - Triton's nvidia/amd drivers call `allocator.get()` at
+        #        kernel-launch time to obtain the alloc function.
+        #      - `triton.set_allocator(fn)` (called from
+        #        triton.language.core during kernel init) does
+        #        `_allocator.set(fn)` — so .set() has to exist or we
+        #        crash with "TorchAllocator object has no attribute
+        #        'set'". (Fixed in 376309ec.)
+        #      - Some launch paths may treat the object itself as the
+        #        alloc callable, so __call__ delegates to the current
+        #        fn.
+        #
+        # 2. `torch_alloc_fn` returns a `torch.Tensor` rather than a raw
+        #    device pointer. `torch.cuda.caching_allocator_alloc` hands
+        #    back an int pointer that is only reclaimed when the caller
+        #    explicitly calls `caching_allocator_delete(ptr)`, which
+        #    Triton never does — so each kernel-launch scratch
+        #    allocation would leak forever. Returning a `torch.Tensor`
+        #    satisfies Triton's Buffer protocol (it exposes
+        #    `data_ptr()`) and lets the caching allocator reclaim the
+        #    block automatically as soon as Triton drops its reference
+        #    after the kernel completes.
         class TorchAllocator:
             def __init__(self) -> None:
                 def torch_alloc_fn(size, alignment, stream):
-                    return torch.cuda.caching_allocator_alloc(size, stream)
+                    return torch.empty(
+                        size,
+                        dtype=torch.int8,
+                        device=torch.cuda.current_device(),
+                    )
                 self._alloc_fn = torch_alloc_fn
 
             def get(self):
