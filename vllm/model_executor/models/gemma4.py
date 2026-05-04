@@ -1373,13 +1373,18 @@ class Gemma4Model(nn.Module, EagleModelMixin):
             ("gate_up_proj", "up_proj", 1),
         ]
 
-        # MoE expert weight mapping: checkpoint can have either:
-        #   1. 3D packed tensors (exploded in _weight_iterator to per-expert 2D)
-        #   2. Already per-expert 2D weights (if quantized)
-        # Map to FusedMoE parameters:
-        #   moe.experts.{id}.gate_proj → FusedMoE w1 (shard of w13)
-        #   moe.experts.{id}.up_proj   → FusedMoE w3 (shard of w13)
-        #   moe.experts.{id}.down_proj → FusedMoE w2
+        # MoE expert weight mapping: per-expert names from the iterator
+        # (either exploded from 3D packed dense tensors, or already
+        # per-expert in NVFP4 quant checkpoints) get rewritten into
+        # FusedMoE's combined param names.
+        #   moe.experts.{id}.gate_proj.<suffix> → moe.experts.w13_<suffix>
+        #   moe.experts.{id}.up_proj.<suffix>   → moe.experts.w13_<suffix>
+        #   moe.experts.{id}.down_proj.<suffix> → moe.experts.w2_<suffix>
+        # The trailing dot in weight_name and trailing underscore in
+        # param_name (matching FusedMoE.make_expert_params_mapping) lets
+        # the suffix flow through name.replace() so quant scale tensors
+        # like .input_scale and .weight_scale_2 are preserved and the
+        # FusedMoE.weight_loader can route them correctly.
         num_experts = getattr(self.config, "num_experts", None) or 0
         # Strategy A: dot-separated suffix
         # (standard AWQ/GPTQ e.g. .qweight, .scales, .weight)
