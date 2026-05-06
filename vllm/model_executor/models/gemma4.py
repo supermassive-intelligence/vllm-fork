@@ -926,21 +926,26 @@ class Gemma4Model(nn.Module):
             ("gate_up_proj", "up_proj", 1),
         ]
 
-        # MoE expert weight mapping: checkpoint 3D packed tensors are
-        # exploded in _weight_iterator to per-expert 2D weights like:
-        #   moe.experts.{id}.gate_proj → FusedMoE w1 (shard of w13)
-        #   moe.experts.{id}.up_proj   → FusedMoE w3 (shard of w13)
-        #   moe.experts.{id}.down_proj → FusedMoE w2
-        # We build the mapping directly since Gemma4 uses bare param
-        # names (no .weight suffix) unlike standard MoE checkpoints.
+        # MoE expert weight mapping: per-expert names from the iterator
+        # (either exploded from 3D packed dense tensors, or already
+        # per-expert in NVFP4 quant checkpoints) get rewritten into
+        # FusedMoE's combined param names.
+        #   moe.experts.{id}.gate_proj.<suffix> → moe.experts.w13_<suffix>
+        #   moe.experts.{id}.up_proj.<suffix>   → moe.experts.w13_<suffix>
+        #   moe.experts.{id}.down_proj.<suffix> → moe.experts.w2_<suffix>
+        # The trailing dot in weight_name and trailing underscore in
+        # param_name (matching FusedMoE.make_expert_params_mapping) lets
+        # the suffix flow through name.replace() so quant scale tensors
+        # like .input_scale and .weight_scale_2 are preserved and the
+        # FusedMoE.weight_loader can route them correctly.
         num_experts = getattr(self.config, "num_experts", None) or 0
         expert_params_mapping = [
             # (param_name, weight_name, expert_id, shard_id)
             (
-                "experts.w13_weight"
+                "moe.experts.w13_"
                 if proj_name in ["gate_proj", "up_proj"]
-                else "experts.w2_weight",
-                f"experts.{expert_id}.{proj_name}",
+                else "moe.experts.w2_",
+                f"moe.experts.{expert_id}.{proj_name}.",
                 expert_id,
                 shard_id,
             )
@@ -1017,10 +1022,13 @@ class Gemma4Model(nn.Module):
                         f"got shape {loaded_weight.shape}"
                     )
                     weight_loader = param.weight_loader
+                    # Pass the original `name` so FusedMoE.weight_loader
+                    # can detect the tensor type via substring match
+                    # (e.g. "input_scale", "weight_scale_2", "weight").
                     weight_loader(
                         param,
                         loaded_weight,
-                        weight_name + ".weight",
+                        name,
                         shard_id=shard_id,
                         expert_id=expert_id,
                     )
@@ -1176,6 +1184,14 @@ class Gemma4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts):
                         ".experts.down_proj",
                         ".moe.down_proj",
                     )
+                # NVFP4 quant checkpoints store experts already exploded
+                # with per-expert names plus scale tensors, e.g.
+                #     .experts.0.down_proj.{weight,input_scale,weight_scale_2}
+                # The 3D-packed renames above don't match these. Insert
+                # `.moe.` so they land at `.moe.experts.X...` matching our
+                # model tree (Gemma4DecoderLayer.moe.experts).
+                elif re.search(r"\.experts\.\d+\.", name):
+                    name = name.replace(".experts.", ".moe.experts.", 1)
 
                 # MoE expert weights: checkpoint stores as 3D packed
                 # tensors.  Explode into per-expert 2D weights for
