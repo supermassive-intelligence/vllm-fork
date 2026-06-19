@@ -684,7 +684,17 @@ class Qwen3MoeForCausalLM(
             "q_proj",
             "k_proj",
             "v_proj",
-        ]
+        ],
+        # Dense `Qwen3MoeMLP` blocks (the non-sparse layers, plus every sparse
+        # layer's `shared_expert`) fuse gate+up into one MergedColumnParallelLinear.
+        # It must be in the packed mapping or the LoRA manager can't wrap it
+        # (`MergedColumnParallelLinearWithLoRA.can_replace_layer` needs the 2-part
+        # mapping) and asserts at engine init. Declared unconditionally: a fully
+        # sparse model simply has no `gate_up_proj` module for it to match.
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
     }
 
     embedding_modules = {
@@ -700,9 +710,10 @@ class Qwen3MoeForCausalLM(
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
-        # Only perform the following mapping when Qwen3MoeMLP exists
-        if getattr(config, "mlp_only_layers", []):
-            self.packed_modules_mapping["gate_up_proj"] = ["gate_proj", "up_proj"]
+        # `gate_up_proj` is now declared on the class-level packed_modules_mapping
+        # (covers dense layers whether they come from `mlp_only_layers` or from the
+        # `decoder_sparse_step` cadence), so no per-instance mutation here — that
+        # also avoids mutating the shared class attribute.
         self.model = Qwen3MoeModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )

@@ -1436,7 +1436,16 @@ class Qwen2VLForConditionalGeneration(
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
+        skip_prefixes = []
+        if self.config.tie_word_embeddings:
+            # Tied embeddings: lm_head shares embed_tokens' weight, so a tied
+            # checkpoint carries no separate lm_head weight. Skip it from the
+            # init-completeness check or AutoWeightsLoader raises
+            # "language_model.lm_head.weight not initialized". Mirrors qwen2.py,
+            # adjusted for the VL module prefix (hf_to_vllm_mapper rewrites
+            # `lm_head.` -> `language_model.lm_head.`, the model-tree name).
+            skip_prefixes.append("language_model.lm_head.")
+        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes or None)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
