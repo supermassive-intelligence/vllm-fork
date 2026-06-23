@@ -83,6 +83,37 @@ def test_infer_rank_ignores_non_lora_keys():
     assert infer_lora_rank(sd) == 8
 
 
+def test_infer_rank_ignores_moe_expert_stacked_tensors():
+    from vllm.tokenformer.lora_from_pt import infer_lora_rank
+
+    # A Qwen3MoE adapter (real shapes from yujiepan/qwen3-moe-tiny-random): the
+    # attention lora_A tensors carry the true rank (8) in shape[0], while the
+    # fused-expert lora_A tensors stack rank×num_experts(×gate/up) into shape[0]
+    # (128, 64) under `.experts` keys. The old single-rank check raised
+    # "Inconsistent LoRA ranks across lora_A tensors: [8, 64, 128]". Rank
+    # inference must read the attention tensors and ignore the expert ones.
+    sd = {
+        "model.layers.0.self_attn.q_proj.lora_A.weight": _fake_tensor((8, 64)),
+        "model.layers.0.self_attn.k_proj.lora_A.weight": _fake_tensor((8, 64)),
+        "model.layers.1.mlp.experts.base_layer.lora_A.weight": _fake_tensor((128, 64)),
+        "model.layers.1.mlp.experts.lora_A.weight": _fake_tensor((64, 128)),
+    }
+    assert infer_lora_rank(sd) == 8
+
+
+def test_infer_rank_only_expert_tensors_raises():
+    from vllm.tokenformer.lora_from_pt import infer_lora_rank
+
+    # An adapter with only `.experts` lora_A (no standard tensor to read the
+    # rank from) can't have its rank inferred — the stacked leading dim is not
+    # the rank.
+    sd = {
+        "model.layers.1.mlp.experts.lora_A.weight": _fake_tensor((64, 128)),
+    }
+    with pytest.raises(ValueError, match="No lora_A tensors"):
+        infer_lora_rank(sd)
+
+
 # --- build_peft_helper_from_pt -----------------------------------------
 
 

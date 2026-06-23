@@ -42,6 +42,17 @@ def infer_lora_rank(lora_sd: dict[str, Any]) -> int:
     ranks_by_key: dict[str, int] = {}
     for key, tensor in lora_sd.items():
         if ".lora_A." in key:
+            # MoE expert LoRA tensors (PEFT fused format: `experts.base_layer`
+            # = gate_up_proj, `experts` = down_proj) stack the adapter rank with
+            # num_experts (and the gate/up split) into the leading dim, so
+            # `shape[0]` is rank × num_experts × parts, NOT the adapter rank. A
+            # Qwen3MoE adapter therefore shows e.g. {8 (attn), 64, 128 (experts)}
+            # and the old single-rank check raised "Inconsistent LoRA ranks".
+            # Infer the rank from the standard (non-expert) lora_A tensors, whose
+            # leading dim is the true rank; vLLM's FusedMoEWithLoRA reconstructs
+            # the per-expert rank from the stacked tensors downstream.
+            if ".experts" in key:
+                continue
             try:
                 rank = int(tensor.shape[0])
             except (AttributeError, TypeError, IndexError) as exc:
@@ -52,7 +63,9 @@ def infer_lora_rank(lora_sd: dict[str, Any]) -> int:
 
     if not ranks_by_key:
         raise ValueError(
-            "No lora_A tensors found — cannot infer rank from state dict."
+            "No lora_A tensors found — cannot infer rank from state dict. "
+            "(Expert `.experts` lora_A tensors are excluded from rank inference "
+            "because they stack rank×num_experts in the leading dim.)"
         )
 
     unique_ranks = set(ranks_by_key.values())
