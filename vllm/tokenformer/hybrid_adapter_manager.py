@@ -118,6 +118,7 @@ class PTWorkerLoRAManager(LRUCacheWorkerLoRAManager):
         """
         try:
             model = self._adapter_manager.model
+            candidates: list[str] = []
             for name, _ in model.named_modules():
                 if name.endswith(".self_attn") or name.endswith(".mlp"):
                     # Strip the layer suffix to get the layers container
@@ -130,13 +131,29 @@ class PTWorkerLoRAManager(LRUCacheWorkerLoRAManager):
                         layers_idx = next(
                             i for i, p in enumerate(parts) if p == "layers"
                         )
-                        prefix = ".".join(parts[: layers_idx + 1]) + "."
-                        logger.debug(
-                            "Detected model layers prefix: %s", prefix
-                        )
-                        return prefix
                     except StopIteration:
                         continue
+                    prefix = ".".join(parts[: layers_idx + 1]) + "."
+                    if prefix not in candidates:
+                        candidates.append(prefix)
+            if candidates:
+                # Prefer the TEXT-DECODER prefix. On multimodal models
+                # named_modules() also yields the vision tower (e.g.
+                # "vision_tower.encoder.layers.") which can be visited
+                # first; re-prefixing decoder LoRA keys onto it collides
+                # them with the real vision keys (the Gemma4 failure mode).
+                # The decoder prefix always ends in "model.layers." — top
+                # level for Qwen3, or "language_model.model.layers." for a
+                # VL-wrapped Gemma4 — whereas the vision tower does not.
+                for prefix in candidates:
+                    if prefix.endswith("model.layers."):
+                        logger.debug("Detected model layers prefix: %s", prefix)
+                        return prefix
+                logger.debug(
+                    "Detected model layers prefix (no decoder match): %s",
+                    candidates[0],
+                )
+                return candidates[0]
         except Exception:
             pass
         logger.debug(
