@@ -533,9 +533,17 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         lora_b: torch.Tensor | list[torch.Tensor],
     ):
         """Overwrites lora tensors at index."""
-        # Make mypy happy
-        assert isinstance(lora_a, list)
-        assert isinstance(lora_b, list)
+        # An adapter that doesn't adapt these routed experts — an attention-only
+        # or dense-MLP-only LoRA, or a ScalarLM `.pt` whose stacked expert
+        # tensors weren't converted to the per-projection gate/up/down list this
+        # fused layer needs — reaches us with a single tensor or None instead of
+        # a list. Disable this expert slot and no-op rather than asserting, so
+        # such adapters still serve. A Phase-2 converter that produces a proper
+        # list passes straight through. See
+        # docs/reports/2026-06-30-moe-expert-lora-serving.md.
+        if not (isinstance(lora_a, list) and isinstance(lora_b, list)):
+            self.reset_lora(index)
+            return
 
         self.reset_lora(index)
         self.adapter_enabled[index] = 1
@@ -708,10 +716,17 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         lora_b: torch.Tensor | list[torch.Tensor],
     ):
         """Overwrites lora tensors at index."""
-        # Make mypy happy
-        assert isinstance(lora_a, list)
-        assert isinstance(lora_b, list)
-        assert len(lora_a) == len(lora_b) == 2
+        # See FusedMoEWithLoRA.set_lora: an adapter that doesn't supply this
+        # fused module's per-projection (w13, w2) list — attention/dense-only, or
+        # an unconverted ScalarLM `.pt` — is a no-op here, not an assert, so it
+        # still serves. docs/reports/2026-06-30-moe-expert-lora-serving.md.
+        if not (
+            isinstance(lora_a, list)
+            and isinstance(lora_b, list)
+            and len(lora_a) == len(lora_b) == 2
+        ):
+            self.reset_lora(index)
+            return
 
         self.reset_lora(index)
         self.adapter_enabled[index] = 1

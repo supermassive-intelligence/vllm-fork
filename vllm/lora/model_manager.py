@@ -14,6 +14,7 @@ from vllm.logger import init_logger
 from vllm.lora.layers import (
     BaseLayerWithLoRA,
     FusedMoE3DWithLoRA,
+    FusedMoEWithLoRA,
     LoRAMapping,
     LoRAMappingType,
 )
@@ -672,6 +673,11 @@ class LoRAModelManager:
         for module_name, module in self.modules.items():
             if isinstance(module, FusedMoE3DWithLoRA):
                 self._stack_moe_lora_weights(lora_model, module, module_name)
+            elif isinstance(module, FusedMoEWithLoRA):
+                # Gated 2D FusedMoE (e.g. Qwen3MoE): split PEFT's fused gate_up
+                # into per-expert w1/w3 + down=w2 for set_lora. (3D keeps gate_up
+                # fused and is handled above.)
+                self._stack_moe_lora_weights_gated(lora_model, module, module_name)
 
         first_lora: LoRALayerWeights = next(iter(lora_model.loras.values()))
         assert first_lora.lora_a is not None
@@ -783,6 +789,62 @@ class LoRAModelManager:
 
                 module_lora.lora_a = lora_a
                 module_lora.lora_b = lora_b
+
+    def _stack_moe_lora_weights_gated(
+        self, lora_model: LoRAModel, module: "FusedMoEWithLoRA", module_name: str
+    ):
+        """Reshape PEFT-fused expert LoRA into the per-expert [w1, w2, w3] list a
+        gated FusedMoEWithLoRA.set_lora consumes.
+
+        ScalarLM/PEFT adapt the grouped Qwen3MoeExperts params via ParamWrapper,
+        exporting two stacked 2-D tensors in PEFT's fused convention:
+        `{experts}.base_layer` = gate_up_proj, `{experts}` = down_proj. PEFT keeps
+        gate and up *fused* (one shared lora_A; lora_B carries the doubled output),
+        and reshapes them per-expert as A:(num_experts, rank, in),
+        B:(out, rank, num_experts) (see peft ParamWrapper.get_delta_weight). The
+        gated 2-D layer instead wants gate (w1) and up (w3) as separate stacked
+        tensors (`_w13_slices == 2`), so we reshape to per-expert and split
+        gate_up's output dim into gate||up (gate first, matching w13 = [w1; w3]),
+        sharing lora_A. down maps straight to w2.
+
+        The 3-D variant keeps gate_up fused and is handled by
+        `_stack_moe_lora_weights`. See
+        docs/reports/2026-06-30-moe-expert-lora-serving.md.
+        """
+        # down_proj lives under the bare experts module name; gate_up under
+        # `.base_layer` (PEFT's name for the wrapped original).
+        down_lora = self._get_lora_layer_weights(lora_model, module_name)
+        if not (down_lora and torch.is_tensor(down_lora.lora_a)):
+            return  # already packed, or no expert weights -> set_lora no-ops
+        gate_up_lora = self._get_lora_layer_weights(
+            lora_model, module_name + ".base_layer"
+        )
+        if gate_up_lora is None:
+            return
+        # Only the gated layout (separate w1/w3) needs the split.
+        if getattr(module, "_w13_slices", 2) != 2:
+            return
+
+        num_experts = module.w13_lora_a_stacked[0].shape[1]
+
+        def to_experts_a(t):  # (num_experts*rank, in) -> (num_experts, rank, in)
+            return t.reshape(num_experts, -1, t.shape[-1])
+
+        def to_experts_b(t):  # (out, num_experts*rank) -> (num_experts, out, rank)
+            return t.reshape(t.shape[0], -1, num_experts).permute(2, 0, 1).contiguous()
+
+        gate_up_a = to_experts_a(gate_up_lora.lora_a)  # (E, rank, in)
+        gate_up_b = to_experts_b(gate_up_lora.lora_b)  # (E, 2*moe_int, rank)
+        down_a = to_experts_a(down_lora.lora_a)        # (E, rank, in)
+        down_b = to_experts_b(down_lora.lora_b)        # (E, hidden, rank)
+
+        half = gate_up_b.shape[1] // 2                 # split gate || up
+        w1_a = w3_a = gate_up_a                        # shared A
+        w1_b = gate_up_b[:, :half, :].contiguous()
+        w3_b = gate_up_b[:, half:, :].contiguous()
+
+        down_lora.lora_a = [w1_a, down_a, w3_a]
+        down_lora.lora_b = [w1_b, down_b, w3_b]
 
     def _get_lora_layer_weights(
         self, lora_model: LoRAModel, module_name: str
