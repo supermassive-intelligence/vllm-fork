@@ -20,6 +20,10 @@ from vllm.lora.layers import (
 )
 from vllm.lora.lora_model import LoRAModel
 from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
+from vllm.lora.moe_lora_utils import (
+    SEPARATE_EXPERT_LEAF_TRIPLES,
+    stack_separate_expert_lora,
+)
 from vllm.lora.punica_wrapper import PunicaWrapperBase, get_punica_wrapper
 from vllm.lora.utils import (
     from_layer,
@@ -674,10 +678,16 @@ class LoRAModelManager:
             if isinstance(module, FusedMoE3DWithLoRA):
                 self._stack_moe_lora_weights(lora_model, module, module_name)
             elif isinstance(module, FusedMoEWithLoRA):
-                # Gated 2D FusedMoE (e.g. Qwen3MoE): split PEFT's fused gate_up
-                # into per-expert w1/w3 + down=w2 for set_lora. (3D keeps gate_up
-                # fused and is handled above.)
-                self._stack_moe_lora_weights_gated(lora_model, module, module_name)
+                # Gated 2D FusedMoE. Two `.pt` layouts land here:
+                #  - separate experts (Mixtral/PhiMoE): one 2-D LoRA per expert per
+                #    projection under `{module_name}.{i}.{w1,w2,w3}` -> stack them.
+                #  - grouped experts (Qwen3MoE): PEFT's fused gate_up/down -> split.
+                if self._detect_separate_expert_leaves(lora_model, module_name):
+                    self._stack_moe_lora_weights_separate(
+                        lora_model, module, module_name
+                    )
+                else:
+                    self._stack_moe_lora_weights_gated(lora_model, module, module_name)
 
         first_lora: LoRALayerWeights = next(iter(lora_model.loras.values()))
         assert first_lora.lora_a is not None
@@ -845,6 +855,73 @@ class LoRAModelManager:
 
         down_lora.lora_a = [w1_a, down_a, w3_a]
         down_lora.lora_b = [w1_b, down_b, w3_b]
+
+    def _detect_separate_expert_leaves(
+        self, lora_model: LoRAModel, module_name: str
+    ) -> tuple[str, str, str] | None:
+        """Return the (gate, down, up) leaf-name triple of a *separate*-expert
+        `.pt` at `module_name` (a fused-experts module ending `.experts`), or None
+        when the adapter isn't the separate layout — i.e. the per-expert 2-D LoRAs
+        `{module_name}.0.{leaf}` aren't all present. Probing expert 0 is enough to
+        pick the naming convention (`w1/w2/w3` vs `gate_proj/down_proj/up_proj`)."""
+        for triple in SEPARATE_EXPERT_LEAF_TRIPLES:
+            if all(
+                lora_model.check_lora_name(f"{module_name}.0.{leaf}")
+                for leaf in triple
+            ):
+                return triple
+        return None
+
+    def _stack_moe_lora_weights_separate(
+        self, lora_model: LoRAModel, module: "FusedMoEWithLoRA", module_name: str
+    ):
+        """Stack per-expert 2-D LoRA into the per-projection `[w1, w2, w3]` lists a
+        gated FusedMoEWithLoRA.set_lora consumes, for the *separate*-expert layout
+        (Mixtral/PhiMoE): experts are a ModuleList, so the `.pt` carries an ordinary
+        2-D LoRA per expert per projection at `{module_name}.{i}.{w1,w2,w3}`.
+
+        Unlike the grouped path (`_stack_moe_lora_weights_gated`), no reshape is
+        needed — each per-expert tensor is already `(rank, in)` / `(out, rank)`, so
+        we gather them by projection and stack along a new leading expert axis. If
+        any expert/projection weight is missing we bail without mutating, leaving
+        set_lora to no-op (the adapter still serves, just without the experts).
+
+        See docs/superpowers/plans/2026-07-06-separate-expert-lora-converter.md.
+        """
+        leaves = self._detect_separate_expert_leaves(lora_model, module_name)
+        if leaves is None:
+            return
+        num_experts = module.w13_lora_a_stacked[0].shape[1]
+
+        # a_by_proj[p] / b_by_proj[p] gather all experts for projection p, in the
+        # (gate, down, up) order of `leaves` (== set_lora's [w1, w2, w3]).
+        a_by_proj: list[list[torch.Tensor]] = [[], [], []]
+        b_by_proj: list[list[torch.Tensor]] = [[], [], []]
+        consumed: list[str] = []
+        for expert_idx in range(num_experts):
+            for p, leaf in enumerate(leaves):
+                name = f"{module_name}.{expert_idx}.{leaf}"
+                w = self._get_lora_layer_weights(lora_model, name)
+                if w is None or not torch.is_tensor(w.lora_a):
+                    return  # incomplete expert set -> serve without experts
+                a_by_proj[p].append(w.lora_a)
+                b_by_proj[p].append(w.lora_b)
+                consumed.append(name)
+
+        lora_a, lora_b = stack_separate_expert_lora(a_by_proj, b_by_proj)
+
+        # Re-key one gathered LoRALayerWeights as the fused module's entry (mirrors
+        # the grouped path reusing `down_lora`), then drop the per-expert entries so
+        # they don't linger as orphaned 2-D LoRAs.
+        container = self._get_lora_layer_weights(
+            lora_model, f"{module_name}.0.{leaves[0]}"
+        )
+        container.lora_a = lora_a
+        container.lora_b = lora_b
+        lora_model.loras[module_name] = container
+        for name in consumed:
+            if name != module_name:
+                lora_model.loras.pop(name, None)
 
     def _get_lora_layer_weights(
         self, lora_model: LoRAModel, module_name: str
