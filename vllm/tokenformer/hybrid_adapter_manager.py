@@ -162,6 +162,33 @@ class PTWorkerLoRAManager(LRUCacheWorkerLoRAManager):
         )
         return "model.layers."
 
+    def _detect_experts_container(self) -> "str | None":
+        """Return the decoder-layer submodule name that holds the MoE
+        experts in the live vLLM model — e.g. ``block_sparse_moe`` for
+        PhiMoE, ``mlp`` for OLMoE/Qwen3MoE — or ``None`` if the model has
+        no ``*.experts`` module.
+
+        The transformers checkpoint saves expert LoRA under whatever the
+        *training-side* module is named (Phi-mini-MoE uses ``mlp.experts``),
+        but the vLLM port may name the same block differently
+        (``block_sparse_moe.experts``). Without a rename the expert keys
+        never match the live module tree, so the grouped-expert converter
+        (`_stack_moe_lora_weights_gated`) can't find them and silently
+        serves the experts with no LoRA. Attention keys (`self_attn.*`)
+        share names across both trees, which is why only the experts
+        no-op. We probe the live model for the real container name and
+        rewrite onto it in `_renormalize_lora_sd_for_model`.
+        """
+        try:
+            model = self._adapter_manager.model
+            for name, _ in model.named_modules():
+                # e.g. "model.layers.0.block_sparse_moe.experts"
+                if name.endswith(".experts") and ".layers." in name:
+                    return name.split(".")[-2]
+        except Exception:
+            pass
+        return None
+
     def _renormalize_lora_sd_for_model(
         self, lora_sd: dict
     ) -> dict:
@@ -177,10 +204,16 @@ class PTWorkerLoRAManager(LRUCacheWorkerLoRAManager):
         model, then re-applies *only* the structural part of the
         normalization (prefix swap + PEFT ``.default.`` strip +
         ClippableLinear ``.linear.`` strip) with the right target.
+
+        It also rewrites the MoE expert container segment (the name
+        immediately before ``.experts``) to whatever the live model uses,
+        so a Phi-mini-MoE adapter trained under ``mlp.experts`` matches
+        vLLM's ``block_sparse_moe.experts``. See `_detect_experts_container`.
         """
         target_prefix = self._detect_model_layers_prefix()
         # target_prefix is e.g. "model.layers." or
         # "language_model.model.layers."
+        experts_container = self._detect_experts_container()
 
         out: dict = {}
         for k, v in lora_sd.items():
@@ -208,6 +241,19 @@ class PTWorkerLoRAManager(LRUCacheWorkerLoRAManager):
                 nk = target_prefix + bare[len("layers."):]
             else:
                 nk = k  # non-layers key (vision_tower, embed_vision, …)
+
+            # Rewrite the MoE expert container segment onto the live
+            # model's name (e.g. trainer `mlp.experts` -> vLLM PhiMoE
+            # `block_sparse_moe.experts`). Only the segment directly
+            # before `.experts` is touched, and only when it differs.
+            if experts_container is not None:
+                segs = nk.split(".")
+                for i, seg in enumerate(segs):
+                    if seg == "experts" and i > 0 \
+                            and segs[i - 1] != experts_container:
+                        segs[i - 1] = experts_container
+                        nk = ".".join(segs)
+                        break
 
             if nk in out:
                 raise ValueError(
