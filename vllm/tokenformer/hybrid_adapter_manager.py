@@ -100,7 +100,20 @@ class PTWorkerLoRAManager(LRUCacheWorkerLoRAManager):
                 else None
             ),
         )
-        self._warn_on_zero_base_match(lora_model, loaded.source_path)
+        reason = self._incompatible_reason(lora_model)
+        if reason is not None:
+            # infra's add_adaptors wraps this call in try/except and
+            # continues, so an incompatible adapter becomes a clean
+            # "Skipping" log line instead of a set_lora crash (cross-arch
+            # dim overrun -> IndexError, retried every reconcile cycle) or a
+            # silent mid-serve no-op. Loading is pre-load-all: every
+            # registered adapter of the served base is loaded eagerly and
+            # the registry filter is base-*name*-granular, so it can't stop
+            # a same-base-but-incompatible (or cross-arch) .pt reaching us.
+            raise ValueError(
+                f"Adapter at {loaded.source_path} is incompatible with the "
+                f"served base and was skipped: {reason}"
+            )
         return lora_model
 
     def _detect_model_layers_prefix(self) -> str:
@@ -263,51 +276,91 @@ class PTWorkerLoRAManager(LRUCacheWorkerLoRAManager):
             out[nk] = v
         return out
 
-    def _warn_on_zero_base_match(self, lora_model, source_path) -> None:
-        """If every parsed LoRA module path is missing from the base
-        model, the adapter will silently no-op at activation time (see
-        `LoRAModelManager.activate_adapter` — `module_lora` lookup
-        returns None and the slot is reset). That's the hardest
-        failure to debug because the adapter still "loads". Turn it
-        into a visible WARNING.
+    def _incompatible_reason(self, lora_model) -> "str | None":
+        """Return a human-readable reason this adapter cannot be applied
+        to the served base, or ``None`` if it looks compatible.
 
-        We're permissive: a single match is enough to silence the
-        warning. Partial matches (e.g. vision-tower keys landing on
-        modules we don't support) are expected and benign.
+        ScalarLM serves every registered adapter of the served base
+        eagerly — `get_adaptors` returns all registered models, with no
+        per-request scoping — and the `register_megatron_models` registry
+        filter is base-*name*-granular. So a `.pt` trained for a different
+        architecture, or a same-base adapter with an incompatible tensor
+        layout, can still reach us. Loading it either crashes `set_lora`
+        (a dim overrun -> IndexError, retried every reconcile cycle) or
+        silently no-ops mid-serve — both are hard to debug because the
+        adapter still "loads". Rejecting here turns it into a clean skip.
+
+        Two checks, both **fail-open** on anything we can't resolve so a
+        valid adapter is never rejected:
+
+          1. Zero base-module overlap. If not one parsed LoRA module path
+             matches a module in the live tree, the adapter is for a
+             different key namespace (wrong arch, or a missing rename).
+          2. Attention input-dim (== hidden_size) mismatch. Every
+             `q/k/v_proj` LoRA `lora_a` is `(rank, hidden_size)`; the input
+             dim of a column-parallel projection is replicated, so it is
+             TP-safe. If it disagrees with the base `hidden_size`, the
+             adapter is cross-arch and would overrun the target slot.
         """
         try:
             base_modules = set(
                 n for n, _ in self._adapter_manager.model.named_modules()
             )
         except Exception:
-            # If we can't read the tree (e.g. _adapter_manager not yet
-            # wired during some tests), skip the check silently.
-            return
+            # Can't read the tree (e.g. _adapter_manager not wired in some
+            # tests) -> fail open.
+            return None
 
         lora_modules = set(lora_model.loras.keys()) if hasattr(
             lora_model, "loras") else set()
         if not lora_modules:
-            return
+            return None
 
-        matches = lora_modules & base_modules
-        if matches:
-            return
+        # Check 1 — zero base-module overlap (wrong namespace / arch).
+        if not (lora_modules & base_modules):
+            sample_lora = sorted(lora_modules)[:3]
+            sample_base = sorted(
+                m for m in base_modules if "self_attn" in m or "mlp" in m
+            )[:3]
+            return (
+                f"none of its {len(lora_modules)} module paths match the "
+                f"base model (sample adapter keys: {sample_lora}; sample "
+                f"base modules: {sample_base}) — wrong architecture or a "
+                f"missing key-normalization rule"
+            )
 
-        # Zero overlap — classic prefix/rename mismatch. Show the
-        # caller a sample from each side so they can eyeball the
-        # transform that's missing.
-        sample_lora = sorted(lora_modules)[:3]
-        sample_base = sorted(
-            m for m in base_modules if "self_attn" in m or "mlp" in m
-        )[:3]
-        logger.warning(
-            "LoRA adapter at %s loaded but NONE of its %d module paths "
-            "match the base model. The adapter will silently have no "
-            "effect at inference. Sample adapter keys: %s. Sample "
-            "base-model modules: %s. Check your trainer-side key "
-            "naming or add a rule to normalize_lora_key.",
-            source_path, len(lora_modules), sample_lora, sample_base,
-        )
+        # Check 2 — attention input dim vs the base hidden_size.
+        hidden = self._base_hidden_size()
+        if hidden is not None:
+            for name, lora in lora_model.loras.items():
+                if name.rsplit(".", 1)[-1] not in ("q_proj", "k_proj",
+                                                   "v_proj"):
+                    continue
+                shape = getattr(getattr(lora, "lora_a", None), "shape", None)
+                if shape is None or len(shape) < 1:
+                    continue  # list/MoE layout -> not an attention proj
+                in_dim = int(shape[-1])
+                if in_dim != hidden:
+                    return (
+                        f"attention {name.rsplit('.', 1)[-1]} LoRA input dim "
+                        f"{in_dim} != base hidden_size {hidden} — trained for "
+                        f"a different model"
+                    )
+        return None
+
+    def _base_hidden_size(self) -> "int | None":
+        """Best-effort read of the served model's hidden size; ``None`` if
+        undeterminable (the dim check is then skipped — fail-open)."""
+        try:
+            cfg = self._adapter_manager.model.config
+        except Exception:
+            return None
+        h = getattr(cfg, "hidden_size", None)
+        if isinstance(h, int):
+            return h
+        # Multimodal wrappers nest the decoder config under text_config.
+        h = getattr(getattr(cfg, "text_config", None), "hidden_size", None)
+        return h if isinstance(h, int) else None
 
 
 class HybridAdapterManager:
