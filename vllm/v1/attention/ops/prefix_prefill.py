@@ -4,6 +4,8 @@
 # The kernels in this file are adapted from LightLLM's context_attention_fwd:
 # https://github.com/ModelTC/lightllm/blob/main/lightllm/models/llama/triton_kernel/context_flashattention_nopad.py
 
+import os
+
 import torch
 
 from vllm.platforms import current_platform
@@ -789,12 +791,16 @@ def context_attention_fwd(
     # For standard models involving powers of 2,
     # follow the original logic (Llama 128/64)
     # For non-standard models (Qwen3-next block_size 544), set to 32.
+    # PREFILL_BLOCK_M / PREFILL_BLOCK_N override the tile without changing the
+    # defaults. gfx1250 targets set PREFILL_BLOCK_M=16 to keep _fwd_kernel's
+    # acc[BLOCK_M, head_dim] fp32 live range within what the register allocator
+    # settles (rocm-systems#149).
     if is_pow2:
-        BLOCK_M = 128
-        BLOCK_N = 64
+        BLOCK_M = int(os.environ.get("PREFILL_BLOCK_M", "128"))
+        BLOCK_N = int(os.environ.get("PREFILL_BLOCK_N", "64"))
     else:
-        BLOCK_M = 32
-        BLOCK_N = 32
+        BLOCK_M = int(os.environ.get("PREFILL_BLOCK_M", "32"))
+        BLOCK_N = int(os.environ.get("PREFILL_BLOCK_N", "32"))
 
     # TRITON_BLOCK_SIZE is kept at 32 to ensure
     # correct alignment logic when the kernel handles
