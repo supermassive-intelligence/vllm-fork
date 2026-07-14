@@ -12,7 +12,7 @@ from typing import Any
 import psutil
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.profiler.wrapper import TorchProfilerWrapper
@@ -178,7 +178,8 @@ class CPUWorker(Worker):
         pass
 
     def determine_available_memory(self) -> int:
-        self.model_runner.warming_up_model()
+        with set_current_vllm_config(self.vllm_config):
+            self.model_runner.warming_up_model()
 
         allowed_cpu_list = get_allowed_cpu_list()
         cpu_core = allowed_cpu_list[0]
