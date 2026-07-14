@@ -87,7 +87,7 @@ def test_add_lora_or_hybrid_without_lora_submanager_raises(
 
 def test_set_active_adapters_forwards(patched_manager):
     mgr, fake_tk = patched_manager
-    requests = {SimpleNamespace(adapter_id=1)}
+    requests = [SimpleNamespace(adapter_id=1)]
     mapping = object()
     mgr.set_active_adapters(requests, mapping)
     fake_tk.set_active_adapters.assert_called_once_with(requests, mapping)
@@ -266,7 +266,7 @@ def test_add_hybrid_routes_to_both(full_manager, monkeypatch):
 
 def test_set_active_adapters_fans_out(full_manager):
     mgr, fake_tk, fake_lora, _ = full_manager
-    requests = {SimpleNamespace(adapter_id=1)}
+    requests = [SimpleNamespace(adapter_id=1)]
     mapping = object()
     mgr.set_active_adapters(requests, mapping)
     fake_tk.set_active_adapters.assert_called_once_with(requests, mapping)

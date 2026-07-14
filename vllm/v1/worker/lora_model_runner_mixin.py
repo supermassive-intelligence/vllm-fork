@@ -161,82 +161,6 @@ class LoRAModelRunnerMixin:
 
     @contextmanager
     def maybe_setup_dummy_loras(self, lora_config: LoRAConfig | None, remove_lora: bool = True):
-        # TODO: ScalarLM this is different from our original fork, see next method
-        if lora_config is None:
-            yield
-        else:
-            # __enter__ code
-            assert self.lora_manager is not None, "LoRA is not enabled"
-
-            num_loras = lora_config.max_loras
-            lora_warmup_rank = (
-                lora_config.max_lora_rank if lora_config.max_lora_rank < 8 else 8
-            )
-            # Make dummy lora requests
-            lora_requests: set[LoRARequest] = {
-                LoRARequest(
-                    lora_name=f"warmup_{lora_id}",
-                    lora_int_id=lora_id,
-                    lora_path="/not/a/real/path",
-                )
-                for lora_id in range(1, num_loras + 1)
-            }
-
-            with self.lora_manager.dummy_lora_cache():
-                # Add the dummy LoRAs here so _set_active_loras doesn't try to
-                # load from disk.
-                for lr in lora_requests:
-                    self.lora_manager.add_dummy_lora(lr, rank=lora_warmup_rank)
-
-                yield
-
-            # __exit__ code
-            if remove_lora:
-                self.lora_manager.remove_all_adapters()
-
-
-    @contextmanager
-    def maybe_setup_dummy_loras_MAIN_FORK(
-        self, lora_config: LoRAConfig | None, remove_lora: bool = True
-    ):
-
-        if lora_config is None:
-            yield
-        else:
-            # __enter__ code
-            assert self.lora_manager is not None, "LoRA is not enabled"
-
-            num_loras = lora_config.max_loras
-            lora_warmup_rank = (
-                lora_config.max_lora_rank if lora_config.max_lora_rank < 8 else 8
-            )
-            # Make dummy lora requests
-            lora_requests: set[LoRARequest] = {
-                LoRARequest(
-                    lora_name=f"warmup_{lora_id}",
-                    lora_int_id=lora_id,
-                    lora_path="/not/a/real/path",
-                )
-                for lora_id in range(1, num_loras + 1)
-            }
-
-            with self.lora_manager.dummy_lora_cache():
-                # Add the dummy LoRAs here so _set_active_loras doesn't try to
-                # load from disk.
-                for lr in lora_requests:
-                    self.lora_manager.add_dummy_lora(lr, rank=lora_warmup_rank)
-
-                yield
-
-            # __exit__ code
-            if remove_lora:
-                self.lora_manager.remove_all_adapters()
-    
-    @contextmanager
-    def maybe_setup_dummy_loras_MAIN_FORK(
-        self, lora_config: LoRAConfig | None, remove_lora: bool = True
-    ):
-
         if lora_config is None:
             yield
         else:
@@ -271,6 +195,8 @@ class LoRAModelRunnerMixin:
             # __exit__ code
             if remove_lora:
                 self.lora_manager.remove_all_adapters()
+
+
 
     @contextmanager
     def maybe_select_dummy_loras(
