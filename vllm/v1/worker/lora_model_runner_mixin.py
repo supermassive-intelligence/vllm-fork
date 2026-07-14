@@ -18,12 +18,41 @@ from vllm.lora.layers import LoRAMapping, LoRAMappingType
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.models import supports_lora
+from vllm.tokenformer.hybrid_adapter_manager import (
+    HybridAdapterManager,
+    PTWorkerLoRAManager,
+)
+from vllm.tokenformer.tokenformer_model_manager import TokenformerModelManager
 from vllm.v1.worker.gpu_input_batch import InputBatch as GPUInputBatch
 from vllm.v1.worker.tpu_input_batch import InputBatch as TPUInputBatch
 
 InputBatch: TypeAlias = TPUInputBatch | GPUInputBatch
 
 logger = init_logger(__name__)
+
+
+_AdapterKind: TypeAlias = "str"  # "lora" | "tokenformer" | "hybrid"
+
+
+def _select_adapter_kind(lora_config: LoRAConfig | None) -> _AdapterKind:
+    """Classify which adapter manager the runner should instantiate.
+
+    The runner only reaches `load_lora_model` when `lora_config is not None`,
+    i.e. at least one of `enable_lora` / `enable_tokenformer` was set.
+    """
+    if lora_config is None:
+        # Defensive: load_lora_model shouldn't be called without a config,
+        # but fall back to the historical behavior if it ever is.
+        return "tokenformer"
+    lora = lora_config.enable_lora
+    tk = lora_config.enable_tokenformer
+    if lora and tk:
+        return "hybrid"
+    if tk:
+        return "tokenformer"
+    # Either enable_lora was True, or (defensively) neither flag is set but
+    # we still have a lora_config — treat both as the lora path.
+    return "lora"
 
 
 # Defined as a mixin for GPUModelRunner
@@ -35,15 +64,52 @@ class LoRAModelRunnerMixin:
         device: torch.device,
     ) -> nn.Module:
         if not supports_lora(model):
-            raise ValueError(f"{model.__class__.__name__} does not support LoRA yet.")
+            raise ValueError(
+                f"{model.__class__.__name__} does not support LoRA yet.")
 
-        # Add LoRA Manager to the Model Runner
-        self.lora_manager = LRUCacheWorkerLoRAManager(
-            vllm_config,
-            device,
-            model.embedding_modules,
+        lora_config = vllm_config.lora_config
+        kind = _select_adapter_kind(lora_config)
+
+        if kind == "tokenformer":
+            self.lora_manager = TokenformerModelManager(
+                model=model, device=device
+            )
+            logger.info(
+                "Created TokenformerModelManager for model %s on device %s.",
+                model.__class__.__name__, device,
+            )
+            return self.lora_manager.model
+
+        if kind == "lora":
+            # Use the ScalarLM `.pt`-aware manager (with fallback to
+            # upstream PEFT when no .pt is present), so adapters
+            # produced by the ScalarLM trainer load without users
+            # needing to set --enable-tokenformer too.
+            self.lora_manager = PTWorkerLoRAManager(
+                vllm_config,
+                device,
+                model.embedding_modules,
+            )
+            logger.info(
+                "Created PTWorkerLoRAManager for model %s on device %s. "
+                "If you intended to serve Tokenformer adapters, use "
+                "--enable-tokenformer instead of --enable-lora.",
+                model.__class__.__name__, device,
+            )
+            return self.lora_manager.create_lora_manager(model, vllm_config)
+
+        # kind == "hybrid"
+        self.lora_manager = HybridAdapterManager(
+            model=model,
+            device=device,
+            vllm_config=vllm_config,
         )
-        return self.lora_manager.create_lora_manager(model, vllm_config)
+        logger.info(
+            "Created HybridAdapterManager for model %s on device %s.",
+            model.__class__.__name__, device,
+        )
+        return self.lora_manager.model
+
 
     def _set_active_loras(
         self,
@@ -53,6 +119,8 @@ class LoRAModelRunnerMixin:
         mapping_type: LoRAMappingType = LoRAMappingType.LANGUAGE,
     ) -> None:
         self._ensure_lora_enabled()
+        if self.lora_manager is None:
+            raise RuntimeError("LoRA is not enabled.")
 
         # Set is_prefill to True, so we always use the SGMV kernels on
         # non-cuda platforms.
@@ -90,10 +158,85 @@ class LoRAModelRunnerMixin:
             prompt_lora_mapping, token_lora_mapping, lora_requests, mapping_type
         )
 
+
     @contextmanager
-    def maybe_setup_dummy_loras(
+    def maybe_setup_dummy_loras(self, lora_config: LoRAConfig | None, remove_lora: bool = True):
+        # TODO: ScalarLM this is different from our original fork, see next method
+        if lora_config is None:
+            yield
+        else:
+            # __enter__ code
+            assert self.lora_manager is not None, "LoRA is not enabled"
+
+            num_loras = lora_config.max_loras
+            lora_warmup_rank = (
+                lora_config.max_lora_rank if lora_config.max_lora_rank < 8 else 8
+            )
+            # Make dummy lora requests
+            lora_requests: set[LoRARequest] = {
+                LoRARequest(
+                    lora_name=f"warmup_{lora_id}",
+                    lora_int_id=lora_id,
+                    lora_path="/not/a/real/path",
+                )
+                for lora_id in range(1, num_loras + 1)
+            }
+
+            with self.lora_manager.dummy_lora_cache():
+                # Add the dummy LoRAs here so _set_active_loras doesn't try to
+                # load from disk.
+                for lr in lora_requests:
+                    self.lora_manager.add_dummy_lora(lr, rank=lora_warmup_rank)
+
+                yield
+
+            # __exit__ code
+            if remove_lora:
+                self.lora_manager.remove_all_adapters()
+
+
+    @contextmanager
+    def maybe_setup_dummy_loras_MAIN_FORK(
         self, lora_config: LoRAConfig | None, remove_lora: bool = True
     ):
+
+        if lora_config is None:
+            yield
+        else:
+            # __enter__ code
+            assert self.lora_manager is not None, "LoRA is not enabled"
+
+            num_loras = lora_config.max_loras
+            lora_warmup_rank = (
+                lora_config.max_lora_rank if lora_config.max_lora_rank < 8 else 8
+            )
+            # Make dummy lora requests
+            lora_requests: set[LoRARequest] = {
+                LoRARequest(
+                    lora_name=f"warmup_{lora_id}",
+                    lora_int_id=lora_id,
+                    lora_path="/not/a/real/path",
+                )
+                for lora_id in range(1, num_loras + 1)
+            }
+
+            with self.lora_manager.dummy_lora_cache():
+                # Add the dummy LoRAs here so _set_active_loras doesn't try to
+                # load from disk.
+                for lr in lora_requests:
+                    self.lora_manager.add_dummy_lora(lr, rank=lora_warmup_rank)
+
+                yield
+
+            # __exit__ code
+            if remove_lora:
+                self.lora_manager.remove_all_adapters()
+    
+    @contextmanager
+    def maybe_setup_dummy_loras_MAIN_FORK(
+        self, lora_config: LoRAConfig | None, remove_lora: bool = True
+    ):
+
         if lora_config is None:
             yield
         else:
@@ -273,6 +416,16 @@ class LoRAModelRunnerMixin:
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         self._ensure_lora_enabled()
+        if not self.lora_manager:
+            # Initialize the tokenformer manager if not already done
+            # This handles the case where tokenformer adapters are loaded dynamically
+            if hasattr(self, 'model') and hasattr(self, 'device'):
+                from vllm.tokenformer.tokenformer_model_manager import TokenformerModelManager
+                self.lora_manager = TokenformerModelManager(model=self.model,
+                                                           device=self.device)
+                logger.info("Initialized TokenformerModelManager for dynamic adapter loading")
+            else:
+                raise RuntimeError("LoRA is not enabled and cannot initialize adapter manager.")
         return self.lora_manager.add_adapter(lora_request)
 
     def remove_lora(self, lora_id: int) -> bool:
