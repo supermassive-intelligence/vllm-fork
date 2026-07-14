@@ -68,6 +68,7 @@ from .interfaces import (
     SupportsLoRA,
     SupportsPP,
     SupportsQuant,
+    SupportsTokenformer,
 )
 from .utils import (
     AutoWeightsLoader,
@@ -546,6 +547,7 @@ class Qwen3MoeForCausalLM(
     SupportsEagle3,
     MixtureOfExperts,
     SupportsQuant,
+    SupportsTokenformer,
 ):
     hf_to_vllm_mapper = Qwen3MoeModel.hf_to_vllm_mapper
     packed_modules_mapping = {
@@ -553,7 +555,17 @@ class Qwen3MoeForCausalLM(
             "q_proj",
             "k_proj",
             "v_proj",
-        ]
+        ],
+        # Dense `Qwen3MoeMLP` blocks (the non-sparse layers, plus every sparse
+        # layer's `shared_expert`) fuse gate+up into one MergedColumnParallelLinear.
+        # It must be in the packed mapping or the LoRA manager can't wrap it
+        # (`MergedColumnParallelLinearWithLoRA.can_replace_layer` needs the 2-part
+        # mapping) and asserts at engine init. Declared unconditionally: a fully
+        # sparse model simply has no `gate_up_proj` module for it to match.
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
     }
 
     embedding_modules = {
@@ -569,9 +581,10 @@ class Qwen3MoeForCausalLM(
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
-        # Only perform the following mapping when Qwen3MoeMLP exists
-        if getattr(config, "mlp_only_layers", []):
-            self.packed_modules_mapping["gate_up_proj"] = ["gate_proj", "up_proj"]
+        # `gate_up_proj` is now declared on the class-level packed_modules_mapping
+        # (covers dense layers whether they come from `mlp_only_layers` or from the
+        # `decoder_sparse_step` cadence), so no per-instance mutation here — that
+        # also avoids mutating the shared class attribute.
         self.model = Qwen3MoeModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
@@ -655,3 +668,78 @@ class Qwen3MoeForCausalLM(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
+
+    def state_dict(self, destination=None, prefix='', keep_vars=False):
+        state_dict = super().state_dict(destination, prefix, keep_vars)
+
+        # unpack keys ending in qkv_proj.weight to separate q_proj, k_proj, v_proj
+        for packed_key, unpacked_keys in self.packed_modules_mapping.items():
+            for key in list(state_dict.keys()):
+                if key.endswith(f"{packed_key}.weight"):
+                    weight = state_dict.pop(key)
+                    logger.debug(f"Unpacking {key} into {unpacked_keys}, original size: {weight.shape}")
+
+                    # Calculate split sizes based on the type of packed parameter
+                    if packed_key == "qkv_proj":
+                        # For qkv_proj, q, k, v can have different sizes due to GQA
+                        tp_size = get_tensor_model_parallel_world_size()
+                        num_heads = self.config.num_attention_heads // tp_size
+                        num_kv_heads = max(1, self.config.num_key_value_heads // tp_size)
+                        head_dim = self.config.head_dim
+                        q_size = num_heads * head_dim
+                        kv_size = num_kv_heads * head_dim
+                        split_sizes = [q_size, kv_size, kv_size]
+                        split_weights = torch.split(weight, split_sizes, dim=0)
+                    else:
+                        # For other packed weights (like gate_up_proj), split equally
+                        split_weights = torch.chunk(weight, len(unpacked_keys), dim=0)
+
+                    for unpacked_key, split_weight in zip(unpacked_keys, split_weights):
+                        new_key = key.replace(packed_key, unpacked_key)
+                        state_dict[new_key] = split_weight
+                        logger.debug(f"Created {new_key} with size: {split_weight.shape}")
+
+                elif key.endswith(f"{packed_key}.bias"):
+                    bias = state_dict.pop(key)
+
+                    # Calculate split sizes for bias (same logic as weights)
+                    if packed_key == "qkv_proj":
+                        tp_size = get_tensor_model_parallel_world_size()
+                        num_heads = self.config.num_attention_heads // tp_size
+                        num_kv_heads = max(1, self.config.num_key_value_heads // tp_size)
+                        head_dim = self.config.head_dim
+                        q_size = num_heads * head_dim
+                        kv_size = num_kv_heads * head_dim
+                        split_sizes = [q_size, kv_size, kv_size]
+                        split_biases = torch.split(bias, split_sizes, dim=0)
+                    else:
+                        split_biases = torch.chunk(bias, len(unpacked_keys), dim=0)
+
+                    for unpacked_key, split_bias in zip(unpacked_keys, split_biases):
+                        new_key = key.replace(packed_key, unpacked_key)
+                        state_dict[new_key] = split_bias
+
+        # remove keys related to expert weights
+        keys_to_remove = []
+
+        for key in state_dict.keys():
+            if ".experts." in key:
+                keys_to_remove.append(key)
+
+        for key in keys_to_remove:
+            state_dict.pop(key)
+
+        # remove keys related to attention scales
+        keys_to_remove = []
+
+        for key in state_dict.keys():
+            if key.endswith(("._q_scale", "._k_scale", "._v_scale", "._prob_scale")):
+                keys_to_remove.append(key)
+
+        for key in keys_to_remove:
+            state_dict.pop(key)
+
+        for key in state_dict.keys():
+            logger.debug("State dict key: %s", key)
+
+        return state_dict
