@@ -1,0 +1,569 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""HybridAdapterManager — dispatches adapter operations across a
+Tokenformer sub-manager and a LoRA sub-manager.
+
+Current state (phase 2 skeleton): the Tokenformer sub-manager is real;
+the LoRA sub-manager is a placeholder. `add_adapter` classifies the
+incoming `.pt` file and, if it's pure Tokenformer, delegates. Pure-LoRA
+and hybrid adapters raise NotImplementedError until the LoRA-from-.pt
+loader lands (option C in the rollout plan).
+
+Once option C is in, this class will:
+ 1. Split the loaded state dict via split_adapter_state_dict.
+ 2. Register the Tokenformer tensors with TokenformerModelManager.
+ 3. Register the LoRA tensors with the LoRA worker manager.
+ 4. At `set_active_adapters` time, fan out to both sub-managers.
+
+See `docs/design/hybrid_lora_tokenformer.md`.
+"""
+
+from __future__ import annotations
+
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, Any
+
+from vllm.logger import init_logger
+from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
+from vllm.tokenformer.adapter_format import (
+    AdapterKind,
+    load_adapter_from_pt,
+    normalize_lora_state_dict,
+)
+from vllm.tokenformer.lora_from_pt import load_lora_model_from_pt
+from vllm.tokenformer.tokenformer_model_manager import TokenformerModelManager
+
+if TYPE_CHECKING:
+    import torch
+    import torch.nn as nn
+
+    from vllm.config import VllmConfig
+    from vllm.lora.lora_model import LoRAModel
+    from vllm.lora.request import LoRARequest
+
+logger = init_logger(__name__)
+
+
+class PTWorkerLoRAManager(LRUCacheWorkerLoRAManager):
+    """LoRA worker manager that prefers ScalarLM's `.pt` adapter format
+    but falls back to upstream HF PEFT (`adapter_config.json +
+    adapter_model.safetensors`) when no `.pt` is in the adapter
+    directory.
+
+    Overrides `_load_adapter` only. Slot management, kernel setup, and
+    dummy-lora caching are inherited.
+    """
+
+    def _load_adapter(self, lora_request: "LoRARequest") -> "LoRAModel":
+        # Prefer `.pt`. If there's no .pt in the dir, delegate to the
+        # upstream PEFT path so users with standard HF LoRA checkpoints
+        # keep working on the same server.
+        from pathlib import Path
+        from vllm.lora.utils import get_adapter_absolute_path
+
+        lora_path = get_adapter_absolute_path(lora_request.lora_path)
+        pt_files = list(Path(lora_path).glob("*.pt"))
+        if not pt_files:
+            logger.info(
+                "No .pt file in %s; falling back to upstream PEFT loader.",
+                lora_path,
+            )
+            return super()._load_adapter(lora_request)
+
+        loaded = load_adapter_from_pt(lora_path)
+        if not loaded.lora_sd:
+            raise ValueError(
+                f"Adapter at {loaded.source_path} has no LoRA tensors "
+                f"(found only Tokenformer keys). Serve with "
+                f"--enable-tokenformer instead, or as a hybrid adapter "
+                f"with both --enable-lora and --enable-tokenformer."
+            )
+        # Re-normalize the lora_sd using the live model's prefix so the
+        # same .pt file works across model families (e.g. Qwen3-4B uses
+        # `model.layers.*` while Qwen3.5-4B uses
+        # `language_model.model.layers.*`).
+        lora_sd = self._renormalize_lora_sd_for_model(loaded.lora_sd)
+        lora_model = load_lora_model_from_pt(
+            lora_sd,
+            lora_model_id=lora_request.adapter_id,
+            device=self.device,
+            dtype=(
+                self.lora_config.lora_dtype
+                if self.lora_config is not None
+                else None
+            ),
+            model_vocab_size=self.vocab_size,
+            metadata=loaded.metadata,
+            max_lora_rank=(
+                self.lora_config.max_lora_rank
+                if self.lora_config is not None
+                else None
+            ),
+        )
+        reason = self._incompatible_reason(lora_model)
+        if reason is not None:
+            # infra's add_adaptors wraps this call in try/except and
+            # continues, so an incompatible adapter becomes a clean
+            # "Skipping" log line instead of a set_lora crash (cross-arch
+            # dim overrun -> IndexError, retried every reconcile cycle) or a
+            # silent mid-serve no-op. Loading is pre-load-all: every
+            # registered adapter of the served base is loaded eagerly and
+            # the registry filter is base-*name*-granular, so it can't stop
+            # a same-base-but-incompatible (or cross-arch) .pt reaching us.
+            raise ValueError(
+                f"Adapter at {loaded.source_path} is incompatible with the "
+                f"served base and was skipped: {reason}"
+            )
+        return lora_model
+
+    def _detect_model_layers_prefix(self) -> str:
+        """Probe the live base model to find which prefix its decoder
+        layers use.  Returns the string that should replace the
+        training-side ``model.layers.`` prefix in LoRA keys.
+
+        Known variants:
+          - ``model.layers.``            — standard decoder-only (Qwen3)
+          - ``language_model.model.layers.`` — VL-wrapped decoder
+                                               (Qwen3.5, Gemma4)
+
+        Falls back to ``model.layers.`` (the vLLM default) if the
+        model tree is not accessible.
+        """
+        try:
+            model = self._adapter_manager.model
+            candidates: list[str] = []
+            for name, _ in model.named_modules():
+                if name.endswith(".self_attn") or name.endswith(".mlp"):
+                    # Strip the layer suffix to get the layers container
+                    # e.g. "language_model.model.layers.0.self_attn"
+                    #   -> "language_model.model.layers."
+                    # or  "model.layers.0.self_attn"
+                    #   -> "model.layers."
+                    parts = name.split(".")
+                    try:
+                        layers_idx = next(
+                            i for i, p in enumerate(parts) if p == "layers"
+                        )
+                    except StopIteration:
+                        continue
+                    prefix = ".".join(parts[: layers_idx + 1]) + "."
+                    if prefix not in candidates:
+                        candidates.append(prefix)
+            if candidates:
+                # Prefer the TEXT-DECODER prefix. On multimodal models
+                # named_modules() also yields the vision tower (e.g.
+                # "vision_tower.encoder.layers.") which can be visited
+                # first; re-prefixing decoder LoRA keys onto it collides
+                # them with the real vision keys (the Gemma4 failure mode).
+                # The decoder prefix always ends in "model.layers." — top
+                # level for Qwen3, or "language_model.model.layers." for a
+                # VL-wrapped Gemma4 — whereas the vision tower does not.
+                for prefix in candidates:
+                    if prefix.endswith("model.layers."):
+                        logger.debug("Detected model layers prefix: %s", prefix)
+                        return prefix
+                logger.debug(
+                    "Detected model layers prefix (no decoder match): %s",
+                    candidates[0],
+                )
+                return candidates[0]
+        except Exception:
+            pass
+        logger.debug(
+            "Could not detect model layers prefix; defaulting to "
+            "model.layers."
+        )
+        return "model.layers."
+
+    def _detect_experts_container(self) -> "str | None":
+        """Return the decoder-layer submodule name that holds the MoE
+        experts in the live vLLM model — e.g. ``block_sparse_moe`` for
+        PhiMoE, ``mlp`` for OLMoE/Qwen3MoE — or ``None`` if the model has
+        no ``*.experts`` module.
+
+        The transformers checkpoint saves expert LoRA under whatever the
+        *training-side* module is named (Phi-mini-MoE uses ``mlp.experts``),
+        but the vLLM port may name the same block differently
+        (``block_sparse_moe.experts``). Without a rename the expert keys
+        never match the live module tree, so the grouped-expert converter
+        (`_stack_moe_lora_weights_gated`) can't find them and silently
+        serves the experts with no LoRA. Attention keys (`self_attn.*`)
+        share names across both trees, which is why only the experts
+        no-op. We probe the live model for the real container name and
+        rewrite onto it in `_renormalize_lora_sd_for_model`.
+        """
+        try:
+            model = self._adapter_manager.model
+            for name, _ in model.named_modules():
+                # e.g. "model.layers.0.block_sparse_moe.experts"
+                if name.endswith(".experts") and ".layers." in name:
+                    return name.split(".")[-2]
+        except Exception:
+            pass
+        return None
+
+    def _renormalize_lora_sd_for_model(
+        self, lora_sd: dict
+    ) -> dict:
+        """Re-run key normalization using the live model's prefix.
+
+        ``adapter_format.normalize_lora_key`` uses a static rule that
+        maps ``model.layers.*`` to ``language_model.model.layers.*``
+        (needed for Qwen3.5/Gemma4).  For models whose vLLM tree really
+        does use ``model.layers.*`` (e.g. Qwen3-4B-Instruct) that
+        mapping is wrong.
+
+        This method detects the correct target prefix from the live
+        model, then re-applies *only* the structural part of the
+        normalization (prefix swap + PEFT ``.default.`` strip +
+        ClippableLinear ``.linear.`` strip) with the right target.
+
+        It also rewrites the MoE expert container segment (the name
+        immediately before ``.experts``) to whatever the live model uses,
+        so a Phi-mini-MoE adapter trained under ``mlp.experts`` matches
+        vLLM's ``block_sparse_moe.experts``. See `_detect_experts_container`.
+        """
+        target_prefix = self._detect_model_layers_prefix()
+        # target_prefix is e.g. "model.layers." or
+        # "language_model.model.layers."
+        experts_container = self._detect_experts_container()
+
+        out: dict = {}
+        for k, v in lora_sd.items():
+            # The key has already been through normalize_lora_key once
+            # (inside load_adapter_from_pt -> split_adapter_state_dict).
+            # That pass may have mapped it to the wrong prefix.  We
+            # undo the structural prefix and re-apply with the correct
+            # target.
+
+            # Undo any previous prefix normalization: if the key starts
+            # with a known vLLM prefix that isn't the target, strip it
+            # back to bare "layers.*" then re-prefix.
+            KNOWN_PREFIXES = (
+                "language_model.model.layers.",
+                "model.layers.",
+            )
+            bare = k
+            for kp in KNOWN_PREFIXES:
+                if k.startswith(kp):
+                    bare = "layers." + k[len(kp):]
+                    break
+
+            # Re-prefix with the correct target
+            if bare.startswith("layers."):
+                nk = target_prefix + bare[len("layers."):]
+            else:
+                nk = k  # non-layers key (vision_tower, embed_vision, …)
+
+            # Rewrite the MoE expert container segment onto the live
+            # model's name (e.g. trainer `mlp.experts` -> vLLM PhiMoE
+            # `block_sparse_moe.experts`). Only the segment directly
+            # before `.experts` is touched, and only when it differs.
+            if experts_container is not None:
+                segs = nk.split(".")
+                for i, seg in enumerate(segs):
+                    if seg == "experts" and i > 0 \
+                            and segs[i - 1] != experts_container:
+                        segs[i - 1] = experts_container
+                        nk = ".".join(segs)
+                        break
+
+            if nk in out:
+                raise ValueError(
+                    f"LoRA key re-normalization collision: {k!r} and an "
+                    f"earlier key both map to {nk!r}."
+                )
+            out[nk] = v
+        return out
+
+    def _incompatible_reason(self, lora_model) -> "str | None":
+        """Return a human-readable reason this adapter cannot be applied
+        to the served base, or ``None`` if it looks compatible.
+
+        ScalarLM serves every registered adapter of the served base
+        eagerly — `get_adaptors` returns all registered models, with no
+        per-request scoping — and the `register_megatron_models` registry
+        filter is base-*name*-granular. So a `.pt` trained for a different
+        architecture, or a same-base adapter with an incompatible tensor
+        layout, can still reach us. Loading it either crashes `set_lora`
+        (a dim overrun -> IndexError, retried every reconcile cycle) or
+        silently no-ops mid-serve — both are hard to debug because the
+        adapter still "loads". Rejecting here turns it into a clean skip.
+
+        Two checks, both **fail-open** on anything we can't resolve so a
+        valid adapter is never rejected:
+
+          1. Zero base-module overlap. If not one parsed LoRA module path
+             matches a module in the live tree, the adapter is for a
+             different key namespace (wrong arch, or a missing rename).
+          2. Attention input-dim (== hidden_size) mismatch. Every
+             `q/k/v_proj` LoRA `lora_a` is `(rank, hidden_size)`; the input
+             dim of a column-parallel projection is replicated, so it is
+             TP-safe. If it disagrees with the base `hidden_size`, the
+             adapter is cross-arch and would overrun the target slot.
+        """
+        try:
+            base_modules = set(
+                n for n, _ in self._adapter_manager.model.named_modules()
+            )
+        except Exception:
+            # Can't read the tree (e.g. _adapter_manager not wired in some
+            # tests) -> fail open.
+            return None
+
+        lora_modules = set(lora_model.loras.keys()) if hasattr(
+            lora_model, "loras") else set()
+        if not lora_modules:
+            return None
+
+        # Check 1 — zero base-module overlap (wrong namespace / arch).
+        if not (lora_modules & base_modules):
+            sample_lora = sorted(lora_modules)[:3]
+            sample_base = sorted(
+                m for m in base_modules if "self_attn" in m or "mlp" in m
+            )[:3]
+            return (
+                f"none of its {len(lora_modules)} module paths match the "
+                f"base model (sample adapter keys: {sample_lora}; sample "
+                f"base modules: {sample_base}) — wrong architecture or a "
+                f"missing key-normalization rule"
+            )
+
+        # Check 2 — attention input dim vs the base hidden_size.
+        hidden = self._base_hidden_size()
+        if hidden is not None:
+            for name, lora in lora_model.loras.items():
+                if name.rsplit(".", 1)[-1] not in ("q_proj", "k_proj",
+                                                   "v_proj"):
+                    continue
+                shape = getattr(getattr(lora, "lora_a", None), "shape", None)
+                if shape is None or len(shape) < 1:
+                    continue  # list/MoE layout -> not an attention proj
+                in_dim = int(shape[-1])
+                if in_dim != hidden:
+                    return (
+                        f"attention {name.rsplit('.', 1)[-1]} LoRA input dim "
+                        f"{in_dim} != base hidden_size {hidden} — trained for "
+                        f"a different model"
+                    )
+        return None
+
+    def _base_hidden_size(self) -> "int | None":
+        """Best-effort read of the served model's hidden size; ``None`` if
+        undeterminable (the dim check is then skipped — fail-open)."""
+        try:
+            cfg = self._adapter_manager.model.config
+        except Exception:
+            return None
+        h = getattr(cfg, "hidden_size", None)
+        if isinstance(h, int):
+            return h
+        # Multimodal wrappers nest the decoder config under text_config.
+        h = getattr(getattr(cfg, "text_config", None), "hidden_size", None)
+        return h if isinstance(h, int) else None
+
+
+class HybridAdapterManager:
+    """Manager that composes a Tokenformer sub-manager and a LoRA
+    sub-manager behind the same interface the runner mixin expects.
+
+    Phase 2 skeleton: only the Tokenformer half is wired. LoRA/hybrid
+    adapters raise NotImplementedError until the LoRA-from-.pt loader
+    is in place.
+    """
+
+    def __init__(
+        self,
+        model: "nn.Module",
+        device: "torch.device",
+        vllm_config: "VllmConfig | None" = None,
+    ):
+        """Instantiate both sub-managers.
+
+        Load order is LoRA layer replacement first, then the Tokenformer
+        surgeon. This yields the composition:
+
+            base(x) + lora_delta(x)  (inside the MLP block)
+            + tokenformer_delta(x)   (added by the surgeon wrapper)
+
+        When `vllm_config` is None (or `vllm_config.lora_config` is
+        None), the LoRA sub-manager is not instantiated and the
+        hybrid manager behaves like a pure Tokenformer manager — this
+        keeps the skeleton path alive for callers that haven't flipped
+        to hybrid yet.
+        """
+        lora_enabled = (
+            vllm_config is not None and vllm_config.lora_config is not None
+        )
+
+        if lora_enabled:
+            # LoRA sub-manager replaces targeted linears with *WithLoRA
+            # wrappers, returning the transformed model. We then feed
+            # that into the Tokenformer surgeon.
+            self._lora: Any = PTWorkerLoRAManager(
+                vllm_config,
+                device,
+                model.embedding_modules,
+            )
+            model = self._lora.create_lora_manager(model, vllm_config)
+        else:
+            self._lora = None
+
+        self._tokenformer = TokenformerModelManager(model=model, device=device)
+        # adapter_id -> AdapterKind, so remove/activate can route correctly.
+        self._kinds: dict[int, AdapterKind] = {}
+
+    # --- model handle exposed to the runner -----------------------------
+
+    @property
+    def model(self) -> "nn.Module":
+        # Today this is the Tokenformer-wrapped model. When the LoRA
+        # sub-manager arrives, order will be: apply LoRA layer
+        # replacement first, then Tokenformer surgeon on top — so this
+        # property will return the model after both passes. The
+        # Tokenformer sub-manager already holds a reference to the
+        # post-surgeon model, so reading from it Just Works.
+        return self._tokenformer.model
+
+    # --- adapter lifecycle ---------------------------------------------
+
+    def add_adapter(self, lora_request) -> bool:
+        """Classify the adapter, then route each half to its sub-manager.
+
+        A hybrid adapter's Tokenformer tensors go to the Tokenformer
+        manager; its LoRA tensors go to the LoRA manager. Both halves
+        share the same adapter id. `activate`/`set_active_adapters` use
+        `self._kinds` to fan out correctly.
+
+        The sub-managers each re-load the `.pt` file from disk. This is
+        redundant (we already classified once) but keeps their existing
+        interfaces intact. Phase 2 isn't perf-sensitive; we'll tighten
+        this in a later step by passing pre-split dicts through.
+        """
+        loaded = load_adapter_from_pt(lora_request.lora_path)
+        kind = loaded.kind
+        self._kinds[lora_request.adapter_id] = kind
+
+        # Tokenformer half.
+        if kind in ("tokenformer", "hybrid"):
+            self._tokenformer.add_adapter(lora_request)
+
+        # LoRA half.
+        if kind in ("lora", "hybrid"):
+            if self._lora is None:
+                raise RuntimeError(
+                    f"Adapter {lora_request.adapter_id} at "
+                    f"{loaded.source_path} contains LoRA tensors, but the "
+                    f"HybridAdapterManager was constructed without a "
+                    f"LoRA-enabled vllm_config. Pass "
+                    f"--enable-lora alongside --enable-tokenformer."
+                )
+            self._lora.add_adapter(lora_request)
+
+        return True
+
+    def remove_adapter(self, adapter_id: int) -> bool:
+        kind = self._kinds.pop(adapter_id, "tokenformer")
+        if kind in ("tokenformer", "hybrid"):
+            self._tokenformer.remove_adapter(adapter_id)
+        if kind in ("lora", "hybrid") and self._lora is not None:
+            self._lora.remove_adapter(adapter_id)
+        return True
+
+    def remove_all_adapters(self) -> None:
+        self._kinds.clear()
+        self._tokenformer.remove_all_adapters()
+        if self._lora is not None:
+            self._lora.remove_all_adapters()
+
+    def pin_adapter(self, adapter_id: int) -> bool:
+        kind = self._kinds.get(adapter_id)
+        if kind in ("tokenformer", "hybrid"):
+            self._tokenformer.pin_adapter(adapter_id)
+        if kind in ("lora", "hybrid") and self._lora is not None:
+            self._lora.pin_adapter(adapter_id)
+        return True
+
+    def list_adapters(self) -> set[int]:
+        """Union of adapter ids across both sub-managers.
+
+        TokenformerModelManager returns a `dict[int, Any]`; the LRU
+        LoRA worker manager returns a `set[int]`. Normalize to a set
+        so the union is sensible; hybrid adapters are naturally
+        de-duplicated. Returning a set matches upstream behavior, which
+        is what `LoRAModelRunnerMixin.list_adapters` forwards to API
+        callers.
+        """
+        ids: set[int] = set()
+        tk = self._tokenformer.list_adapters()
+        if tk is not None:
+            ids |= set(tk)  # works for both dict (keys) and set
+        if self._lora is not None:
+            lora = self._lora.list_adapters()
+            if lora is not None:
+                ids |= set(lora)
+        return ids
+
+    # --- per-step activation -------------------------------------------
+
+    def set_active_adapters(self, lora_requests, lora_mapping) -> None:
+        """Fan out to both sub-managers.
+
+        Both managers see the full request set so hybrid adapters
+        (whose id is in both managers' registries) are activated in both
+        places. Each sub-manager is expected to skip ids it doesn't own
+        — Tokenformer uses the skip-unregistered guard we added in
+        6529423ba, and the LRU LoRA manager already no-ops on unknown
+        ids via `list_adapters` membership checks.
+        """
+        self._tokenformer.set_active_adapters(lora_requests, lora_mapping)
+        if self._lora is not None:
+            self._lora.set_active_adapters(lora_requests, lora_mapping)
+
+    def activate_adapter(self, adapter_id: int) -> bool:
+        kind = self._kinds.get(adapter_id, "tokenformer")
+        if kind in ("tokenformer", "hybrid"):
+            self._tokenformer.activate_adapter(adapter_id)
+        if kind in ("lora", "hybrid") and self._lora is not None:
+            self._lora.activate_adapter(adapter_id)
+        return True
+
+    def deactivate_adapter(self, adapter_id: int) -> bool:
+        kind = self._kinds.get(adapter_id, "tokenformer")
+        if kind in ("tokenformer", "hybrid"):
+            self._tokenformer.deactivate_adapter(adapter_id)
+        if kind in ("lora", "hybrid") and self._lora is not None:
+            self._lora.deactivate_adapter(adapter_id)
+        return True
+
+    # --- warmup plumbing ------------------------------------------------
+
+    @contextmanager
+    def dummy_lora_cache(self):
+        with self._tokenformer.dummy_lora_cache():
+            if self._lora is not None:
+                with self._lora.dummy_lora_cache():
+                    yield
+            else:
+                yield
+
+    def add_dummy_lora(self, lora_request, rank: int = 8) -> bool:
+        """Register the dummy with both sub-managers when both are present.
+
+        Tokenformer's `add_dummy_lora` is a no-op that exists purely to
+        satisfy the warmup path. The LRU LoRA sub-manager, however,
+        actually registers a rank-`rank` zero adapter at a slot — that
+        registration is load-bearing for cudagraph profiling of the
+        LoRA kernels. If we only forward to Tokenformer, the LoRA-side
+        cudagraph capture runs without any dummy in the slots and
+        misses the LoRA path entirely.
+        """
+        self._tokenformer.add_dummy_lora(lora_request, rank=rank)
+        if self._lora is not None:
+            self._lora.add_dummy_lora(lora_request, rank=rank)
+        return True
+
+    # --- misc -----------------------------------------------------------
+
+    def supports_tower_connector_lora(self) -> bool:
+        return False
