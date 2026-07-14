@@ -198,7 +198,7 @@ class TokenformerModelManager:
         self._active_adapter = None
 
     def get_adapter(self, adapter_id: int) -> Optional[Any]:
-        get_adapter(adapter_id, self._registered_adapters)
+        return self._registered_adapters.get(adapter_id)
 
     def list_adapters(self) -> Dict[int, Any]:
         return list_adapters(self._registered_adapters)
@@ -252,8 +252,10 @@ def deactivate_adapter(adapter_id: int, active_adapters: dict[int, None],
 
 def remove_adapter(adapter_id: int, registered_adapters: dict[int, Any],
                    deactivate_func: callable) -> bool:
+    if adapter_id not in registered_adapters:
+        return False
     deactivate_func(adapter_id)
-    return bool(registered_adapters.pop(adapter_id, None))
+    return True
 
 
 def list_adapters(registered_adapters: dict[int, Any]) -> dict[int, Any]:
