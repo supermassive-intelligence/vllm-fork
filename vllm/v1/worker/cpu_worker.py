@@ -12,7 +12,7 @@ from typing import Any
 import psutil
 import torch
 
-from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.profiler.wrapper import TorchProfilerWrapper
@@ -253,12 +253,7 @@ class CPUWorker(Worker):
         # Note: the model has been compiled in determine_available_memory(),
         # Only compile here for models without kv cache
         if len(self.model_runner.kv_caches) == 0:
-            # ScalarLM carry-over from an older base; upstream v0.25.1
-            # warms up without this context and handles compilation
-            # settings inside warming_up_model itself. Likely removable,
-            # but keep until verified on a live CPU deployment.
-            with set_current_vllm_config(self.vllm_config):
-                self.model_runner.warming_up_model()
+            self.model_runner.warming_up_model()
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
