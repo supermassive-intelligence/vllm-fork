@@ -1091,7 +1091,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   # _C_stable_libtorch is abi compatible with PyTorch >= TORCH_TARGET_VERSION
   # which is currently set to 2.11.
   target_compile_definitions(_C_stable_libtorch PRIVATE
-    TORCH_TARGET_VERSION=0x020B000000000000ULL)
+    TORCH_TARGET_VERSION=0x020C000000000000ULL)
 
   # Needed to use cuda/hip APIs from C-shim
   if(VLLM_GPU_LANG STREQUAL "CUDA")
@@ -1316,7 +1316,7 @@ define_extension_target(
 # _moe_C_stable_libtorch is abi compatible with PyTorch >= TORCH_TARGET_VERSION
 # which is currently set to 2.11.
 target_compile_definitions(_moe_C_stable_libtorch PRIVATE
-  TORCH_TARGET_VERSION=0x020B000000000000ULL)
+  TORCH_TARGET_VERSION=0x020C000000000000ULL)
 
 # Needed to use cuda/hip APIs from C-shim
 if(VLLM_GPU_LANG STREQUAL "CUDA")
