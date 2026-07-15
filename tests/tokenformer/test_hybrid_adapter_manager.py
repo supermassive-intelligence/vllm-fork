@@ -273,6 +273,41 @@ def test_set_active_adapters_fans_out(full_manager):
     fake_lora.set_active_adapters.assert_called_once_with(requests, mapping)
 
 
+def test_set_active_adapters_filters_tokenformer_ids_from_lora(full_manager):
+    """Regression: pure-Tokenformer ids forwarded to the LoRA
+    sub-manager made its inherited `_apply_adapters` lazily load them
+    as LoRA and raise "has no LoRA tensors" on the first batch. They
+    must be dropped from the LoRA-side request set and zeroed out of
+    the mappings (0 = no-LoRA slot)."""
+    from vllm.lora.layers import LoRAMapping
+
+    mgr, fake_tk, fake_lora, _ = full_manager
+    mgr._kinds = {5: "tokenformer", 7: "lora"}
+    req_tk = SimpleNamespace(adapter_id=5)
+    req_lora = SimpleNamespace(adapter_id=7)
+    requests = [req_tk, req_lora]
+    mapping = LoRAMapping(
+        index_mapping=(5, 5, 7, 0),
+        prompt_mapping=(5, 7),
+        is_prefill=True,
+    )
+
+    mgr.set_active_adapters(requests, mapping)
+
+    # Tokenformer half sees everything, untouched.
+    fake_tk.set_active_adapters.assert_called_once_with(requests, mapping)
+
+    # LoRA half sees only the LoRA request, with tokenformer ids
+    # rewritten to the no-LoRA sentinel in both mappings.
+    (lora_requests, lora_mapping), _ = fake_lora.set_active_adapters.call_args
+    assert list(lora_requests) == [req_lora]
+    assert lora_mapping.index_mapping == (0, 0, 7, 0)
+    assert lora_mapping.prompt_mapping == (0, 7)
+    assert lora_mapping.is_prefill is True
+    # The original mapping must not be mutated in place.
+    assert mapping.index_mapping == (5, 5, 7, 0)
+
+
 def test_get_dummy_lora_warmup_rank_delegates_to_lora(full_manager):
     mgr, fake_tk, fake_lora, _ = full_manager
     fake_lora.get_dummy_lora_warmup_rank.return_value = 16
