@@ -275,6 +275,12 @@ def _load_adapter_checkpoint(
     checkpoint_file = files[0]
 
     import torch  # lazy
+    if map_location is None:
+        # Default to CPU: with map_location=None torch restores tensors
+        # onto the device recorded at save time (e.g. the trainer's
+        # cuda:0), which under TP>1 would land every rank's copy on
+        # GPU 0. Consumers move tensors to their target device later.
+        map_location = "cpu"
     checkpoint = torch.load(checkpoint_file, map_location=map_location)
     if not isinstance(checkpoint, dict) or "model_state_dict" not in checkpoint:
         raise ValueError(
