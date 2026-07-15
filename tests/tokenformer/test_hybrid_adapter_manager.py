@@ -273,6 +273,18 @@ def test_set_active_adapters_fans_out(full_manager):
     fake_lora.set_active_adapters.assert_called_once_with(requests, mapping)
 
 
+def test_get_dummy_lora_warmup_rank_delegates_to_lora(full_manager):
+    mgr, fake_tk, fake_lora, _ = full_manager
+    fake_lora.get_dummy_lora_warmup_rank.return_value = 16
+    assert mgr.get_dummy_lora_warmup_rank(8) == 16
+    fake_lora.get_dummy_lora_warmup_rank.assert_called_once_with(8)
+
+
+def test_get_dummy_lora_warmup_rank_default_without_lora(patched_manager):
+    mgr, fake_tk = patched_manager
+    assert mgr.get_dummy_lora_warmup_rank(8) == 8
+
+
 def test_add_dummy_lora_fans_out_when_lora_present(full_manager):
     mgr, fake_tk, fake_lora, _ = full_manager
     req = SimpleNamespace(adapter_id=0, lora_path="/dummy")
