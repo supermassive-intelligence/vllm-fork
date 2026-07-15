@@ -124,6 +124,19 @@ class LoRAConfig:
 
     @model_validator(mode="after")
     def _validate_lora_config(self) -> Self:
+        # ScalarLM fork: the `.pt` trainer always exports MoE expert LoRA in
+        # the fused/grouped (gate_up_proj / down_proj) layout, regardless of
+        # whether the base MoE model registers as 2D or 3D. Force the
+        # universal 2D MoE wrapper (FusedMoEWithLoRA) so those grouped
+        # adapters route through the 3D->2D conversion
+        # (LoRAModelManager._convert_3d_to_2d_moe_lora) instead of reaching
+        # FusedMoEWithLoRA.set_lora as a raw tensor and tripping its
+        # `assert isinstance(lora_a, list)`. This LoRAConfig only exists when
+        # the adapter subsystem is active (enable_lora / enable_tokenformer),
+        # so it is the fork's serving path by construction. Standard 2D
+        # per-expert PEFT adapters are unaffected: they stay
+        # is_3d_lora_weight=False and pack through _slice_moe_lora_ep.
+        self.enable_mixed_moe_lora_format = True
         if self.max_cpu_loras is None:
             self.max_cpu_loras = self.max_loras
         elif self.max_cpu_loras < self.max_loras:

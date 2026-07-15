@@ -185,7 +185,7 @@ def load_lora_model_from_pt(
         "rank=%d, alpha=%d, %d tensors.",
         lora_model_id, peft_helper.r, peft_helper.lora_alpha, len(lora_sd),
     )
-    return LoRAModel.from_lora_tensors(
+    lora_model = LoRAModel.from_lora_tensors(
         lora_model_id=lora_model_id,
         tensors=lora_sd,
         peft_helper=peft_helper,
@@ -193,3 +193,13 @@ def load_lora_model_from_pt(
         dtype=dtype,
         model_vocab_size=model_vocab_size,
     )
+    # MoE expert LoRA is exported in the fused/grouped PEFT layout
+    # (`...experts.base_layer` = gate_up_proj, `...experts` = down_proj),
+    # which vLLM's LoRA manager calls the "3D" layout. Flag it so the
+    # manager runs `_convert_3d_to_2d_moe_lora` under the universal 2D MoE
+    # wrapper (forced on via LoRAConfig.enable_mixed_moe_lora_format).
+    # Non-MoE adapters have no `.experts` keys and stay 2D; the flag is
+    # ignored for them because they never reach a FusedMoEWithLoRA module.
+    if any(".experts" in key for key in lora_sd):
+        lora_model.is_3d_lora_weight = True
+    return lora_model
