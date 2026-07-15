@@ -464,6 +464,18 @@ class HybridAdapterManager:
             self._lora.add_dummy_lora(lora_request, rank=rank)
         return True
 
+    def get_dummy_lora_warmup_rank(self, default_rank: int) -> int:
+        """Warmup-rank hook from the worker-manager interface.
+
+        The LoRA sub-manager is the one that actually registers dummy
+        adapters (and may bump the rank, e.g. for fully-sharded MoE
+        LoRA), so delegate when it exists. Tokenformer ignores the
+        rank entirely.
+        """
+        if self._lora is not None:
+            return self._lora.get_dummy_lora_warmup_rank(default_rank)
+        return default_rank
+
     # --- misc -----------------------------------------------------------
 
     def supports_tower_connector_lora(self) -> bool:

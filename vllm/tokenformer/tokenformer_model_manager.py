@@ -182,6 +182,10 @@ class TokenformerModelManager:
 
         if adapter_id == self._active_adapter:
             self.deactivate_adapter(adapter_id)
+            # Clear the active marker, or the next empty-batch
+            # deactivate_all_adapters() would deactivate this id again
+            # after it's gone from the registry and hit a KeyError.
+            self._active_adapter = None
 
         del self._registered_adapters[adapter_id]
         logger.info(f"Adapter {adapter_id} removed")
@@ -230,6 +234,14 @@ class TokenformerModelManager:
         # Tokenformer doesn't need to actually add dummy LoRAs, just accept the call
         logger.debug(f"Adding dummy LoRA {lora_request.lora_name} with rank {rank} (no-op for tokenformer)")
         pass
+
+    def get_dummy_lora_warmup_rank(self, default_rank: int) -> int:
+        """Warmup-rank hook from the worker-manager interface.
+
+        `add_dummy_lora` is a no-op for tokenformer, so the rank never
+        matters here; return the caller's default unchanged.
+        """
+        return default_rank
 
 def add_adapter(adapter: Any, registered_adapters: dict[int, Any],
                 capacity: int, add_func: callable) -> bool:
