@@ -103,13 +103,13 @@ def load_aware_call(func):
     async def wrapper(*args, **kwargs):
         raw_request = kwargs.get("raw_request", args[1] if len(args) > 1 else None)
 
-        if not getattr(raw_request.app.state, "enable_server_load_tracking",
-                       False):
+        # Without a raw_request there is nothing to track against (and
+        # app.state is unreachable to even read the flag), so fall
+        # through to the handler instead of raising like upstream does.
+        if raw_request is None or not getattr(
+            raw_request.app.state, "enable_server_load_tracking", False
+        ):
             return await func(*args, **kwargs)
-
-        if raw_request is None:
-            raise ValueError(
-                "raw_request required when server load tracking is enabled")
 
         # ensure the counter exists
         if not hasattr(raw_request.app.state, "server_load_metrics"):
