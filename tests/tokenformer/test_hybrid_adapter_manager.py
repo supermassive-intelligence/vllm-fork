@@ -85,6 +85,28 @@ def test_add_lora_or_hybrid_without_lora_submanager_raises(
         mgr.add_adapter(req)
 
 
+def test_add_adapter_resolves_path_before_classification(
+    patched_manager, monkeypatch
+):
+    """The classification load must open the same directory the
+    sub-managers resolve to (HF-hub ids, relative paths)."""
+    mgr, fake_tk = patched_manager
+    import vllm.tokenformer.hybrid_adapter_manager as mod
+
+    seen = {}
+    monkeypatch.setattr(
+        mod, "get_adapter_absolute_path", lambda p: f"/resolved{p}"
+    )
+
+    def _fake_load(path):
+        seen["path"] = path
+        return _fake_loaded("tokenformer")
+
+    monkeypatch.setattr(mod, "load_adapter_from_pt", _fake_load)
+    mgr.add_adapter(SimpleNamespace(adapter_id=3, lora_path="/tmp/a"))
+    assert seen["path"] == "/resolved/tmp/a"
+
+
 def test_set_active_adapters_forwards(patched_manager):
     mgr, fake_tk = patched_manager
     requests = [SimpleNamespace(adapter_id=1)]

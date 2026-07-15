@@ -25,6 +25,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from vllm.logger import init_logger
+from vllm.lora.utils import get_adapter_absolute_path
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.tokenformer.adapter_format import (
     AdapterKind,
@@ -60,7 +61,6 @@ class PTWorkerLoRAManager(LRUCacheWorkerLoRAManager):
         # upstream PEFT path so users with standard HF LoRA checkpoints
         # keep working on the same server.
         from pathlib import Path
-        from vllm.lora.utils import get_adapter_absolute_path
 
         lora_path = get_adapter_absolute_path(lora_request.lora_path)
         pt_files = list(Path(lora_path).glob("*.pt"))
@@ -342,7 +342,11 @@ class HybridAdapterManager:
         interfaces intact. Phase 2 isn't perf-sensitive; we'll tighten
         this in a later step by passing pre-split dicts through.
         """
-        loaded = load_adapter_from_pt(lora_request.lora_path)
+        # Resolve like both sub-managers do (absolute/relative paths,
+        # HF-hub ids) — classification must open the same directory the
+        # sub-managers will load from.
+        lora_path = get_adapter_absolute_path(lora_request.lora_path)
+        loaded = load_adapter_from_pt(lora_path)
         kind = loaded.kind
         self._kinds[lora_request.adapter_id] = kind
 
