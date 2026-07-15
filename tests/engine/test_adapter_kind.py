@@ -47,7 +47,10 @@ def test_enable_tokenformer_cli_flag_parses():
     ns = parser.parse_args(["--model", "dummy", "--enable-tokenformer"])
     args = EngineArgs.from_cli_args(ns)
     assert args.enable_tokenformer is True
-    assert args.enable_lora is False
+    # Upstream registers --enable-lora with BooleanOptionalAction and no
+    # explicit default, so an absent flag parses to None (not False);
+    # every downstream check is truthiness-based.
+    assert not args.enable_lora
 
 
 def test_enable_tokenformer_builds_lora_config():
