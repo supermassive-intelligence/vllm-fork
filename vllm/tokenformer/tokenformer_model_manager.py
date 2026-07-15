@@ -188,6 +188,10 @@ class TokenformerModelManager:
             self._active_adapter = None
 
         del self._registered_adapters[adapter_id]
+        # Keep LRU accounting in sync for externally-driven removals,
+        # or capacity eviction later pops a stale id and evicts nothing.
+        if adapter_id in self._lru_adaptor_ids:
+            self._lru_adaptor_ids.remove(adapter_id)
         logger.info(f"Adapter {adapter_id} removed")
 
     def deactivate_all_adapters(self) -> None:
@@ -196,19 +200,29 @@ class TokenformerModelManager:
         self._active_adapter = None
 
     def remove_all_adapters(self) -> None:
-        for id in self._registered_adapters:
-            self.deactivate_adapter(id)
+        # Only the active adapter has weights applied to the model, so
+        # deactivating just that one is enough (deactivating every
+        # registered adapter reloaded the full model once per entry).
+        self.deactivate_all_adapters()
         self._registered_adapters.clear()
-        self._active_adapter = None
+        self._lru_adaptor_ids.clear()
 
     def get_adapter(self, adapter_id: int) -> Optional[Any]:
         return self._registered_adapters.get(adapter_id)
 
-    def list_adapters(self) -> Dict[int, Any]:
-        return list_adapters(self._registered_adapters)
+    def list_adapters(self) -> set[int]:
+        # The worker-manager contract (and the engine's list_loras RPC)
+        # wants a set of adapter ids, not the id -> TokenformerModel
+        # mapping — the model objects carry tensors and don't belong on
+        # the control plane.
+        return set(self._registered_adapters)
 
     def pin_adapter(self, adapter_id: int) -> bool:
-        pass
+        logger.debug(
+            f"Pinning is not supported for tokenformer adapters; "
+            f"adapter {adapter_id} stays subject to LRU eviction."
+        )
+        return False
 
     @property
     def capacity(self) -> int:
@@ -216,7 +230,7 @@ class TokenformerModelManager:
 
     @property
     def adapter_slots(self) -> int:
-        pass
+        return self.capacity
 
     @contextmanager
     def dummy_lora_cache(self):
@@ -268,7 +282,3 @@ def remove_adapter(adapter_id: int, registered_adapters: dict[int, Any],
         return False
     deactivate_func(adapter_id)
     return True
-
-
-def list_adapters(registered_adapters: dict[int, Any]) -> dict[int, Any]:
-    return dict(registered_adapters)
