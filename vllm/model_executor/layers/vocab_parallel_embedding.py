@@ -251,10 +251,6 @@ class VocabParallelEmbedding(PluggableLayer):
     ):
         super().__init__()
 
-        # Make sure no embeddings are added for LoRA
-        if org_num_embeddings is not None:
-            num_embeddings = org_num_embeddings
-
         # Keep the input dimensions.
         self.disable_tp = disable_tp
         if disable_tp:
