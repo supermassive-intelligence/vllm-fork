@@ -27,6 +27,12 @@ logger = init_logger(__name__)
 # device from the Triton-provided stream handle crashed with
 # "Overflow when unpacking DeviceIndex" under multi-GPU tensor
 # parallelism.
+#
+# TODO(next-sync): upstream main (post-v0.25.1) added an official
+# equivalent, vllm/triton_utils/allocation.py::set_triton_allocator(),
+# registered at the kernel call sites (fused_moe_lora_op, the GDN ops)
+# with an explicit device. When rebasing past v0.25.1, drop this
+# module-global patch in favor of that mechanism.
 try:
     if torch.cuda.is_available():
         from triton.runtime import _allocation

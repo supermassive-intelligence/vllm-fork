@@ -13,18 +13,6 @@ from starlette.types import Scope
 
 from vllm.v1.metrics.prometheus import get_prometheus_registry
 
-# Workaround for AttributeError: '_IncludedRouter' object has no attribute 'path'
-# in prometheus-fastapi-instrumentator when using nested routers.
-_original_get_route_name = _pfi_routing.get_route_name
-
-def patched_get_route_name(request):
-    try:
-        return _original_get_route_name(request)
-    except AttributeError:
-        return "unknown_route"
-
-_pfi_routing.get_route_name = patched_get_route_name
-
 
 def _patch_instrumentator_route_walk() -> None:
     """Make prometheus-fastapi-instrumentator's route walk tolerate routes
