@@ -61,3 +61,50 @@ def test_deactivate_all_after_remove_does_not_raise(manager, monkeypatch):
 
 def test_remove_unknown_adapter_returns_false(manager):
     assert manager.remove_adapter(99) is False
+
+
+def test_list_adapters_returns_id_set(manager):
+    # The worker-manager contract is set[int]; adapter objects (which
+    # hold tensors) must not leak into the engine's list_loras RPC.
+    manager._registered_adapters[3] = SimpleNamespace(tokenformers={})
+    manager._registered_adapters[9] = SimpleNamespace(tokenformers={})
+    assert manager.list_adapters() == {3, 9}
+
+
+def test_pin_adapter_reports_unsupported(manager):
+    assert manager.pin_adapter(1) is False
+
+
+def test_adapter_slots_matches_capacity(manager):
+    assert manager.adapter_slots == manager.capacity
+
+
+def test_remove_adapter_syncs_lru_accounting(manager, monkeypatch):
+    """External removal used to leave the id in _lru_adaptor_ids, so a
+    later capacity eviction popped the stale id and evicted nothing."""
+    manager._registered_adapters[7] = SimpleNamespace(tokenformers={})
+    manager._lru_adaptor_ids.append(7)
+    monkeypatch.setattr(manager, "deactivate_adapter", lambda _id: True)
+    manager.remove_adapter(7)
+    assert manager._lru_adaptor_ids == []
+
+
+def test_remove_all_only_deactivates_active(manager, monkeypatch):
+    """Only the active adapter has weights applied; remove_all used to
+    run a full deactivation (model-sized weight reload) per registered
+    adapter."""
+    calls = []
+    monkeypatch.setattr(
+        manager, "deactivate_adapter", lambda _id: calls.append(_id)
+    )
+    manager._registered_adapters[1] = SimpleNamespace(tokenformers={})
+    manager._registered_adapters[2] = SimpleNamespace(tokenformers={})
+    manager._lru_adaptor_ids.extend([1, 2])
+    manager._active_adapter = 2
+
+    manager.remove_all_adapters()
+
+    assert calls == [2]
+    assert manager._registered_adapters == {}
+    assert manager._lru_adaptor_ids == []
+    assert manager._active_adapter is None
