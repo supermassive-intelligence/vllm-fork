@@ -253,6 +253,10 @@ class CPUWorker(Worker):
         # Note: the model has been compiled in determine_available_memory(),
         # Only compile here for models without kv cache
         if len(self.model_runner.kv_caches) == 0:
+            # ScalarLM carry-over from an older base; upstream v0.25.1
+            # warms up without this context and handles compilation
+            # settings inside warming_up_model itself. Likely removable,
+            # but keep until verified on a live CPU deployment.
             with set_current_vllm_config(self.vllm_config):
                 self.model_runner.warming_up_model()
         # Reset the seed to ensure that the random state is not affected by
@@ -261,26 +265,6 @@ class CPUWorker(Worker):
         return CompilationTimes(
             language_model=self.compilation_config.compilation_time,
             encoder=self.compilation_config.encoder_compilation_time,
-        )
-
-    def _get_autobind_cpu_ids(
-        self, cpu_selector: Callable[[list[LogicalCPUInfo]], list[LogicalCPUInfo]]
-    ) -> str:
-        """
-        Return CPU ids to bind based on NUMA nodes.
-        Currently for rank N, only CPU ids on the N-th node in available NUMA
-        node list will be selected.
-        Args:
-            cpu_selector: a callable object to select CPUs from a CPU list
-            of a physical core. The input is a LogicalCPUInfo list, sorted by
-            the LogicalCPUInfo.id. A selected LogicalCPUInfo list should be
-            returned.
-        """
-        # simulate multiple numa nodes, for testing
-        sim_multi_numa_nodes = os.environ.get("VLLM_CPU_SIM_MULTI_NUMA", "0") != "0"
-
-        allowed_numa_nodes, logical_cpu_list = (
-            CpuPlatform.get_allowed_cpu_core_node_list()
         )
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None):
