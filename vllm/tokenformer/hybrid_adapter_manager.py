@@ -21,6 +21,7 @@ See `docs/design/hybrid_lora_tokenformer.md`.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from vllm.logger import init_logger
@@ -408,18 +409,48 @@ class HybridAdapterManager:
     # --- per-step activation -------------------------------------------
 
     def set_active_adapters(self, lora_requests, lora_mapping) -> None:
-        """Fan out to both sub-managers.
+        """Fan out to both sub-managers, filtering the LoRA side.
 
-        Both managers see the full request set so hybrid adapters
-        (whose id is in both managers' registries) are activated in both
-        places. Each sub-manager is expected to skip ids it doesn't own
-        — Tokenformer uses the skip-unregistered guard we added in
-        6529423ba, and the LRU LoRA manager already no-ops on unknown
-        ids via `list_adapters` membership checks.
+        The Tokenformer sub-manager sees the full request set — it
+        skips ids it doesn't own (the guard from 6529423ba).
+
+        The LoRA sub-manager must NOT see pure-Tokenformer ids: its
+        inherited `_apply_adapters` lazily `_load_adapter`s every id it
+        hasn't registered, which raises "has no LoRA tensors" for a
+        Tokenformer-only `.pt`. Those ids are also zeroed out of the
+        token/prompt mappings (0 = no-LoRA) so `convert_mapping` never
+        looks up a LoRA slot for them. Ids absent from `_kinds` (dummy
+        warmup loras registered via `add_dummy_lora`, upstream-style
+        lazily-loaded LoRA requests) pass through untouched.
         """
         self._tokenformer.set_active_adapters(lora_requests, lora_mapping)
-        if self._lora is not None:
-            self._lora.set_active_adapters(lora_requests, lora_mapping)
+        if self._lora is None:
+            return
+
+        tk_only_ids = {
+            adapter_id
+            for adapter_id, kind in self._kinds.items()
+            if kind == "tokenformer"
+        }
+        lora_side_requests = lora_requests
+        lora_side_mapping = lora_mapping
+        if tk_only_ids:
+            lora_side_requests = [
+                r for r in lora_requests if r.adapter_id not in tk_only_ids
+            ]
+            if lora_mapping is not None:
+                lora_side_mapping = replace(
+                    lora_mapping,
+                    index_mapping=tuple(
+                        0 if i in tk_only_ids else i
+                        for i in lora_mapping.index_mapping
+                    ),
+                    prompt_mapping=tuple(
+                        0 if i in tk_only_ids else i
+                        for i in lora_mapping.prompt_mapping
+                    ),
+                )
+        self._lora.set_active_adapters(lora_side_requests, lora_side_mapping)
 
     def activate_adapter(self, adapter_id: int) -> bool:
         kind = self._kinds.get(adapter_id, "tokenformer")
