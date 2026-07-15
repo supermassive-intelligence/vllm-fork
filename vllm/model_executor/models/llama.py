@@ -368,15 +368,12 @@ class LlamaModel(nn.Module, EagleModelMixin):
 
         self.config = config
         self.quant_config = quant_config
-        # vLLM removed LoRAConfig.lora_extra_vocab_size in the version this fork
-        # rebased onto. The extra-vocab term is unused here anyway (vocab_size
-        # below has `#+ lora_vocab` commented out), so keep it 0 instead of
-        # dereferencing the removed attribute, which crashed EngineCore at load.
-        lora_vocab = 0
-        self.vocab_size = config.vocab_size #+ lora_vocab
-        self.org_vocab_size = config.vocab_size
-        if get_pp_group().is_first_rank or (config.tie_word_embeddings
-                                            and get_pp_group().is_last_rank):
+
+        self.vocab_size = config.vocab_size
+
+        if get_pp_group().is_first_rank or (
+            config.tie_word_embeddings and get_pp_group().is_last_rank
+        ):
             self.embed_tokens = VocabParallelEmbedding(
                 self.vocab_size,
                 config.hidden_size,
@@ -487,9 +484,6 @@ class LlamaForCausalLM(
         )
 
         if get_pp_group().is_last_rank:
-            self.unpadded_vocab_size = config.vocab_size
-            #if lora_config:
-            #    self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
             self.lm_head = ParallelLMHead(
                 config.vocab_size,
                 config.hidden_size,
