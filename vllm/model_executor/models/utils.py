@@ -1074,3 +1074,84 @@ def scatter_output_slices(
         sliced = output[offset : offset + n_tok]
         dest[idx] = sliced.clone() if clone else sliced
         offset += n_tok
+
+
+_STATE_DICT_SCALE_SUFFIXES = ("._q_scale", "._k_scale", "._v_scale", "._prob_scale")
+
+
+def unpack_packed_modules_state_dict(
+    state_dict: dict[str, torch.Tensor],
+    *,
+    prefix: str,
+    packed_modules_mapping: Mapping[str, list[str]],
+    config: PretrainedConfig,
+) -> dict[str, torch.Tensor]:
+    """Rewrite a state dict into the ScalarLM trainer's key layout.
+
+    Packed projections are split back into their per-projection HF names
+    (``qkv_proj`` -> ``q_proj``/``k_proj``/``v_proj`` with GQA-aware
+    sizes, other packed modules into equal chunks), and keys with no HF
+    checkpoint equivalent (fused-expert tensors, attention-scale
+    buffers) are dropped.
+
+    Only keys under ``prefix`` are touched. When the model is a
+    submodule of a wrapper (e.g. multimodal gemma3), torch's recursive
+    ``state_dict()`` hands over the shared, already-populated
+    destination dict; sibling modules such as a vision tower have their
+    own ``qkv_proj`` whose shape does not match this ``config``, and
+    rewriting those would crash in ``torch.split`` or silently corrupt
+    them. At the top level ``prefix`` is ``""`` and every key is in
+    scope.
+
+    Mutates ``state_dict`` in place and returns the same object — when
+    torch supplied a shared ``destination``, that exact dict must be
+    handed back.
+    """
+    from vllm.distributed.parallel_state import model_parallel_is_initialized
+
+    # Inside a running engine TP is always initialized; out-of-engine
+    # callers (unit tests, offline tooling) hold the full weights.
+    tp_size = (
+        get_tensor_model_parallel_world_size()
+        if model_parallel_is_initialized()
+        else 1
+    )
+
+    def _qkv_split_sizes() -> list[int]:
+        num_heads = config.num_attention_heads // tp_size
+        num_kv_heads = max(1, config.num_key_value_heads // tp_size)
+        head_dim = getattr(config, "head_dim", None)
+        if head_dim is None:
+            head_dim = config.hidden_size // config.num_attention_heads
+        q_size = num_heads * head_dim
+        kv_size = num_kv_heads * head_dim
+        return [q_size, kv_size, kv_size]
+
+    def _split(tensor: torch.Tensor, packed_key: str, num_parts: int):
+        if packed_key == "qkv_proj":
+            # q, k, and v can have different sizes due to GQA.
+            return torch.split(tensor, _qkv_split_sizes(), dim=0)
+        # Other packed modules (like gate_up_proj) split equally.
+        return torch.chunk(tensor, num_parts, dim=0)
+
+    for packed_key, unpacked_keys in packed_modules_mapping.items():
+        suffixes = (f"{packed_key}.weight", f"{packed_key}.bias")
+        for key in list(state_dict.keys()):
+            if not key.startswith(prefix) or not key.endswith(suffixes):
+                continue
+            tensor = state_dict.pop(key)
+            logger.debug(
+                "Unpacking %s into %s, original size: %s",
+                key, unpacked_keys, tensor.shape,
+            )
+            parts = _split(tensor, packed_key, len(unpacked_keys))
+            for unpacked_key, part in zip(unpacked_keys, parts):
+                state_dict[key.replace(packed_key, unpacked_key)] = part
+
+    for key in list(state_dict.keys()):
+        if not key.startswith(prefix):
+            continue
+        if ".experts." in key or key.endswith(_STATE_DICT_SCALE_SUFFIXES):
+            del state_dict[key]
+
+    return state_dict
