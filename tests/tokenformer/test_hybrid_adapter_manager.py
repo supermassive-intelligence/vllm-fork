@@ -401,3 +401,22 @@ def test_remove_all_clears_both(full_manager, monkeypatch):
     fake_tk.remove_all_adapters.assert_called_once()
     fake_lora.remove_all_adapters.assert_called_once()
     assert mgr._kinds == {}
+
+
+def test_add_adapter_rolls_back_on_lora_half_failure(full_manager, monkeypatch):
+    """A hybrid adapter whose LoRA half fails to register must not
+    leave the tokenformer half + _kinds entry behind — a stale ghost
+    would keep activating on later batches."""
+    mgr, fake_tk, fake_lora, _ = full_manager
+    import vllm.tokenformer.hybrid_adapter_manager as mod
+
+    monkeypatch.setattr(
+        mod, "load_adapter_from_pt", lambda _p: _fake_loaded("hybrid")
+    )
+    fake_lora.add_adapter.side_effect = RuntimeError("punica says no")
+
+    with pytest.raises(RuntimeError, match="punica says no"):
+        mgr.add_adapter(SimpleNamespace(adapter_id=9, lora_path="/tmp/a"))
+
+    fake_tk.remove_adapter.assert_called_once_with(9)
+    assert 9 not in mgr._kinds

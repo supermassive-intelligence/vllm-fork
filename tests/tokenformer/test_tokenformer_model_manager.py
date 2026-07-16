@@ -108,3 +108,28 @@ def test_remove_all_only_deactivates_active(manager, monkeypatch):
     assert manager._registered_adapters == {}
     assert manager._lru_adaptor_ids == []
     assert manager._active_adapter is None
+
+
+def test_unsupported_model_warns_about_skipped_surgery(caplog):
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="vllm"):
+        TokenformerModelManager(model=nn.Linear(2, 2), device=torch.device("cpu"))
+    assert any("SupportsTokenformer" in r.message for r in caplog.records)
+
+
+def test_from_local_checkpoint_picks_sorted_first_pt(tmp_path):
+    from vllm.tokenformer.tokenformer_model_manager import TokenformerModel
+
+    # Write b.pt first so filesystem order differs from sorted order.
+    torch.save(
+        {"model_state_dict": {"x": torch.tensor([2.0])}}, tmp_path / "b.pt"
+    )
+    torch.save(
+        {"model_state_dict": {"x": torch.tensor([1.0])}}, tmp_path / "a.pt"
+    )
+    model = TokenformerModel.from_local_checkpoint(
+        str(tmp_path), device=torch.device("cpu")
+    )
+    # Must match adapter_format's sorted-first choice: a.pt.
+    assert model.tokenformers["x"].item() == 1.0
