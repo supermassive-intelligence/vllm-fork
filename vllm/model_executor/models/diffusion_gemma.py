@@ -656,7 +656,11 @@ def _compiled_sample_step(
     if tp_size > 1:
         soft_embeds = torch.ops.vllm.all_reduce(soft_embeds, group_name=tp_group_name)
     soft_embeds = soft_embeds * normalizer
-    sc_embeds[decode_slots] = soft_embeds * sc_keep
+    # sc_embeds is a persistent fp32 buffer (see DiffusionGemmaRequestStates)
+    # while soft_embeds is bf16 (probs @ embed_weight); index_put_ requires the
+    # source dtype to match the destination, so cast to the buffer dtype. The
+    # consumer (_apply_self_conditioning) symmetrically casts back on read.
+    sc_embeds[decode_slots] = (soft_embeds * sc_keep).to(sc_embeds.dtype)
 
     # Overwrite canvas with argmax for newly converged denoise requests
     newly_converged = (converged & is_denoise).unsqueeze(1)
