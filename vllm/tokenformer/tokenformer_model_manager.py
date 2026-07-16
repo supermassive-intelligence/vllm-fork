@@ -28,8 +28,11 @@ class TokenformerModel:
     def from_local_checkpoint(
         cls, model_dir: str, device: torch.device
     ) -> "TokenformerModel":
-        # Find all .pt files in the directory
-        files = list(Path(model_dir).glob("*.pt"))
+        # Find all .pt files in the directory. Sorted, so a directory
+        # with several checkpoints picks the same file as the
+        # classifier in adapter_format (Path.glob order is
+        # filesystem-dependent).
+        files = sorted(Path(model_dir).glob("*.pt"))
 
         if len(files) == 0:
             raise FileNotFoundError(f"No .pt file found in {model_dir}")
@@ -56,6 +59,13 @@ class TokenformerModelManager:
         if supports_tokenformer(model):
             self.model = TokenformerSurgeon(model, device).insert_adapter_modules()
         else:
+            logger.warning(
+                "%s does not declare SupportsTokenformer; skipping "
+                "tokenformer surgery. Adapters served on this model will "
+                "only apply base-weight overrides — any tokenformer_{k,v,p} "
+                "tensors in the adapter will have no effect.",
+                type(model).__name__,
+            )
             self.model = model
 
         self._registered_adapters: Dict[int, Any] = {}
