@@ -92,15 +92,15 @@ def normalize_lora_key(key: str) -> str:
     if key.startswith("model.language_model."):
         # Gemma4 language tower: HF has `.language_model.layers`;
         # vLLM has `.language_model.model.layers`.
-        key = "language_model.model." + key[len("model.language_model."):]
+        key = "language_model.model." + key[len("model.language_model.") :]
     elif key.startswith("model.layers."):
         # Qwen3.5: trainer saves under `model.layers.*` but this vLLM
         # build wraps the decoder under `language_model.model.layers.*`.
-        key = "language_model.model." + key[len("model."):]
+        key = "language_model.model." + key[len("model.") :]
     elif key.startswith("model."):
         # Gemma4 multimodal sub-modules (vision_tower, embed_vision, …):
         # vLLM exposes these without the top-level `model.` wrapper.
-        key = key[len("model."):]
+        key = key[len("model.") :]
 
     # Step 2 — strip PEFT's PeftModel `.default` adapter-name segment.
     key = key.replace(".lora_A.default.", ".lora_A.")
@@ -143,8 +143,7 @@ def has_tokenformer_keys(state_dict_keys) -> bool:
 
 def has_lora_keys(state_dict_keys) -> bool:
     """True iff any key looks like a LoRA parameter."""
-    return any(any(seg in k for seg in _LORA_PATH_SEGMENTS)
-               for k in state_dict_keys)
+    return any(any(seg in k for seg in _LORA_PATH_SEGMENTS) for k in state_dict_keys)
 
 
 @dataclass(frozen=True)
@@ -175,8 +174,7 @@ def classify_adapter(state_dict) -> AdapterClassification:
 
     Raises `ValueError` if the state dict contains neither kind of key.
     """
-    keys = list(state_dict.keys()) if hasattr(state_dict, "keys") \
-        else list(state_dict)
+    keys = list(state_dict.keys()) if hasattr(state_dict, "keys") else list(state_dict)
     return AdapterClassification(
         has_tokenformer=has_tokenformer_keys(keys),
         has_lora=has_lora_keys(keys),
@@ -275,6 +273,7 @@ def _load_adapter_checkpoint(
     checkpoint_file = files[0]
 
     import torch  # lazy
+
     if map_location is None:
         # Default to CPU: with map_location=None torch restores tensors
         # onto the device recorded at save time (e.g. the trainer's
@@ -283,10 +282,14 @@ def _load_adapter_checkpoint(
         map_location = "cpu"
     checkpoint = torch.load(checkpoint_file, map_location=map_location)
     if not isinstance(checkpoint, dict) or "model_state_dict" not in checkpoint:
+        got = (
+            list(checkpoint.keys())
+            if isinstance(checkpoint, dict)
+            else type(checkpoint).__name__
+        )
         raise ValueError(
             f"Adapter file {checkpoint_file} has no top-level "
-            f"'model_state_dict' key. Got: "
-            f"{list(checkpoint.keys()) if isinstance(checkpoint, dict) else type(checkpoint).__name__}"
+            f"'model_state_dict' key. Got: {got}"
         )
     metadata = checkpoint.get("metadata", {})
     if not isinstance(metadata, dict):
@@ -308,9 +311,7 @@ def load_adapter_from_pt(
     `ValueError` if the file is malformed or contains neither
     Tokenformer nor LoRA keys.
     """
-    sd, metadata = _load_adapter_checkpoint(
-        model_dir, map_location=map_location
-    )
+    sd, metadata = _load_adapter_checkpoint(model_dir, map_location=map_location)
     classification = classify_adapter(sd)
     kind = classification.kind  # raises ValueError on neither
     tk_sd, lora_sd = split_adapter_state_dict(sd)

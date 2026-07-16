@@ -128,6 +128,7 @@ def test_metadata_use_rslora_is_respected():
     sd = {"q_proj.lora_A.weight": _fake_tensor((16, 4096))}
     helper = build_peft_helper_from_pt(sd, metadata={"use_rslora": True})
     import math
+
     assert helper.vllm_lora_scaling_factor == pytest.approx(
         helper.lora_alpha / math.sqrt(helper.r)
     )
@@ -140,13 +141,16 @@ def test_explicit_alpha_beats_metadata():
     # Explicit kwarg takes precedence — tests stay deterministic even
     # when a file happens to ship metadata.
     helper = build_peft_helper_from_pt(
-        sd, lora_alpha=100, metadata={"lora_alpha": 48},
+        sd,
+        lora_alpha=100,
+        metadata={"lora_alpha": 48},
     )
     assert helper.lora_alpha == 100
 
 
 def test_warning_when_no_metadata_alpha(caplog):
     import logging
+
     from vllm.tokenformer.lora_from_pt import build_peft_helper_from_pt
 
     sd = {"q_proj.lora_A.weight": _fake_tensor((16, 4096))}
@@ -159,6 +163,7 @@ def test_warning_when_no_metadata_alpha(caplog):
 
 def test_no_warning_when_metadata_alpha_present(caplog):
     import logging
+
     from vllm.tokenformer.lora_from_pt import build_peft_helper_from_pt
 
     sd = {"q_proj.lora_A.weight": _fake_tensor((16, 4096))}
@@ -174,6 +179,7 @@ def test_rslora_scaling_uses_sqrt_of_rank():
     helper = build_peft_helper_from_pt(sd, use_rslora=True)
     # vllm_lora_scaling_factor = lora_alpha / sqrt(r) under rsLoRA
     import math
+
     assert helper.vllm_lora_scaling_factor == pytest.approx(
         helper.lora_alpha / math.sqrt(helper.r)
     )

@@ -22,9 +22,7 @@ from vllm.tokenformer.tokenformer_model_manager import (  # noqa: E402
 
 @pytest.fixture
 def manager():
-    return TokenformerModelManager(
-        model=nn.Linear(2, 2), device=torch.device("cpu")
-    )
+    return TokenformerModelManager(model=nn.Linear(2, 2), device=torch.device("cpu"))
 
 
 def test_get_dummy_lora_warmup_rank_returns_default(manager):
@@ -94,9 +92,7 @@ def test_remove_all_only_deactivates_active(manager, monkeypatch):
     run a full deactivation (model-sized weight reload) per registered
     adapter."""
     calls = []
-    monkeypatch.setattr(
-        manager, "deactivate_adapter", lambda _id: calls.append(_id)
-    )
+    monkeypatch.setattr(manager, "deactivate_adapter", lambda _id: calls.append(_id))
     manager._registered_adapters[1] = SimpleNamespace(tokenformers={})
     manager._registered_adapters[2] = SimpleNamespace(tokenformers={})
     manager._lru_adaptor_ids.extend([1, 2])
@@ -122,12 +118,8 @@ def test_from_local_checkpoint_picks_sorted_first_pt(tmp_path):
     from vllm.tokenformer.tokenformer_model_manager import TokenformerModel
 
     # Write b.pt first so filesystem order differs from sorted order.
-    torch.save(
-        {"model_state_dict": {"x": torch.tensor([2.0])}}, tmp_path / "b.pt"
-    )
-    torch.save(
-        {"model_state_dict": {"x": torch.tensor([1.0])}}, tmp_path / "a.pt"
-    )
+    torch.save({"model_state_dict": {"x": torch.tensor([2.0])}}, tmp_path / "b.pt")
+    torch.save({"model_state_dict": {"x": torch.tensor([1.0])}}, tmp_path / "a.pt")
     model = TokenformerModel.from_local_checkpoint(
         str(tmp_path), device=torch.device("cpu")
     )
