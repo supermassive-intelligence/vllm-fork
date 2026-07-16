@@ -8,6 +8,7 @@ from vllm.tokenformer.tokenformer_surgeon import (
     TokenformerSurgeon,
 )
 from vllm.model_executor.models import SupportsLoRA, supports_tokenformer
+from vllm.model_executor.models.utils import enable_scalarlm_state_dict_export
 from vllm.lora.utils import get_adapter_absolute_path, get_lora_id
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
@@ -56,6 +57,14 @@ class TokenformerModelManager:
         model: SupportsLoRA,
         device: torch.device,
     ):
+        # The activate/deactivate round-trip (state_dict -> load_weights)
+        # and the ScalarLM trainer contract need the export layout
+        # (unpacked projections, expert/scale tensors dropped). The
+        # model-side state_dict overrides stay canonical unless this
+        # manager exists, so vanilla flows (sharded saves, dummy init)
+        # are unaffected.
+        enable_scalarlm_state_dict_export()
+
         if supports_tokenformer(model):
             self.model = TokenformerSurgeon(model, device).insert_adapter_modules()
         else:

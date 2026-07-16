@@ -109,7 +109,8 @@ def test_prefix_scopes_rewrite_to_own_subtree():
 
 
 class _FakeTextModel(nn.Module):
-    """Stand-in for a ForCausalLM with the shared state_dict override."""
+    """Stand-in for a ForCausalLM with the shared state_dict override
+    (same gate + rewrite pattern as gemma3/qwen2/qwen3/qwen3_moe)."""
 
     packed_modules_mapping = MAPPING
     config = CFG
@@ -119,7 +120,13 @@ class _FakeTextModel(nn.Module):
         self.qkv_proj = nn.Linear(32, 64, bias=False)
 
     def state_dict(self, destination=None, prefix="", keep_vars=False):
+        from vllm.model_executor.models.utils import (
+            scalarlm_state_dict_export_enabled,
+        )
+
         state_dict = super().state_dict(destination, prefix, keep_vars)
+        if not scalarlm_state_dict_export_enabled():
+            return state_dict
         return unpack_packed_modules_state_dict(
             state_dict,
             prefix=prefix,
@@ -146,10 +153,13 @@ class _FakeMMWrapper(nn.Module):
         self.language_model = _FakeTextModel()
 
 
-def test_wrapper_recursion_leaves_siblings_untouched():
+def test_wrapper_recursion_leaves_siblings_untouched(monkeypatch):
     """torch's Module.state_dict calls each child's (overridden)
     state_dict with the shared destination and the child's prefix; the
     override must only rewrite its own subtree."""
+    import vllm.model_executor.models.utils as mutils
+
+    monkeypatch.setattr(mutils, "_scalarlm_state_dict_export", True)
     sd = _FakeMMWrapper().state_dict()
 
     assert sd["vision_tower.qkv_proj.weight"].shape == (9, 5)
@@ -157,3 +167,34 @@ def test_wrapper_recursion_leaves_siblings_untouched():
     assert sd["language_model.q_proj.weight"].shape == (32, 32)
     assert sd["language_model.k_proj.weight"].shape == (16, 32)
     assert sd["language_model.v_proj.weight"].shape == (16, 32)
+
+
+def test_override_is_canonical_until_export_enabled(monkeypatch):
+    """Regression (codex ultra review): the rewrite used to apply
+    unconditionally, so vanilla flows consuming the canonical state
+    dict — sharded saves, dummy init — silently lost expert tensors
+    and got unpacked projections even with tokenformer disabled. The
+    override must be a no-op until a tokenformer manager enables the
+    export layout."""
+    import vllm.model_executor.models.utils as mutils
+
+    monkeypatch.setattr(mutils, "_scalarlm_state_dict_export", False)
+    sd = _FakeTextModel().state_dict()
+    assert "qkv_proj.weight" in sd  # canonical, still packed
+    assert "q_proj.weight" not in sd
+
+    monkeypatch.setattr(mutils, "_scalarlm_state_dict_export", True)
+    sd = _FakeTextModel().state_dict()
+    assert "qkv_proj.weight" not in sd
+    assert sd["q_proj.weight"].shape == (32, 32)
+
+
+def test_tokenformer_manager_enables_export(monkeypatch):
+    import vllm.model_executor.models.utils as mutils
+    from vllm.tokenformer.tokenformer_model_manager import (
+        TokenformerModelManager,
+    )
+
+    monkeypatch.setattr(mutils, "_scalarlm_state_dict_export", False)
+    TokenformerModelManager(model=nn.Linear(2, 2), device=torch.device("cpu"))
+    assert mutils.scalarlm_state_dict_export_enabled()
