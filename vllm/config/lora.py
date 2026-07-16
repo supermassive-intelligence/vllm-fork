@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
@@ -114,6 +115,16 @@ class LoRAConfig:
         factors.append(self.lora_dtype)
         factors.append(self.enable_tower_connector_lora)
         factors.append(self.enable_mixed_moe_lora_format)
+        # The adapter kind decides which manager wraps the model (LoRA
+        # layer wrappers, the tokenformer surgeon, or both), so it
+        # changes the compiled graph; without these, lora-only,
+        # tokenformer-only, and hybrid configs hash identically.
+        factors.append(bool(self.enable_lora))
+        factors.append(self.enable_tokenformer)
+        # The tokenformer surgeon sizes its adapter parameters from
+        # these env vars, so they alter parameter shapes in the graph.
+        factors.append(os.getenv("TOKENFORMER_NUM_HEADS", "4"))
+        factors.append(os.getenv("TOKENFORMER_R", "32"))
         # target_modules affects which modules get LoRA applied
         factors.append(
             tuple(sorted(self.target_modules)) if self.target_modules else None

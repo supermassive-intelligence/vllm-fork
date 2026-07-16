@@ -2183,7 +2183,11 @@ class EngineArgs:
 
         lora_config = (
             LoRAConfig(
-                enable_lora=self.enable_lora,
+                # bool(): upstream registers --enable-lora with
+                # BooleanOptionalAction and no default, so an absent flag
+                # parses to None, which the strict bool field rejects when
+                # --enable-tokenformer alone triggers this construction.
+                enable_lora=bool(self.enable_lora),
                 enable_tokenformer=self.enable_tokenformer,
                 max_lora_rank=self.max_lora_rank,
                 max_loras=self.max_loras,
