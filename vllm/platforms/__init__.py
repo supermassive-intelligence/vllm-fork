@@ -220,9 +220,19 @@ builtin_platform_plugins = {
 def resolve_current_platform_cls_qualname() -> str:
     platform_plugins = load_plugins_by_group(PLATFORM_PLUGINS_GROUP)
 
+    # SCALARLM FIX: an explicit VLLM_TARGET_DEVICE=cpu must take
+    # precedence over device autodetection — otherwise a CPU deployment
+    # on a machine that also has CUDA/ROCm/XPU dies with "Only one
+    # platform plugin can be activated: ['cuda', 'cpu']". Out-of-tree
+    # plugins keep their higher precedence below.
+    if os.environ.get("VLLM_TARGET_DEVICE") == "cpu":
+        builtin_plugins: dict = {"cpu": cpu_platform_plugin}
+    else:
+        builtin_plugins = builtin_platform_plugins
+
     activated_plugins = []
 
-    for name, func in chain(builtin_platform_plugins.items(), platform_plugins.items()):
+    for name, func in chain(builtin_plugins.items(), platform_plugins.items()):
         try:
             assert callable(func)
             platform_cls_qualname = func()
