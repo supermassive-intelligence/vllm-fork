@@ -260,6 +260,25 @@ class PTWorkerLoRAManager(LRUCacheWorkerLoRAManager):
                 "decoder.layers.",
                 "model.layers.",
             )
+
+            # DiffusionGemma self-conditioning MLP: the trainer saves it under
+            # `model.decoder.self_conditioning.*` (pass-1 strips `model.` ->
+            # `decoder.self_conditioning.*`), but vLLM exposes it at TOP LEVEL as
+            # `self_conditioning.*` (a sibling of `model`, not on the layers
+            # backbone). Anchor on the `self_conditioning.` segment and drop
+            # everything before it. Must run before the layers logic since these
+            # keys never start with a `layers.` prefix. No-op for other models.
+            SC_MARKER = "self_conditioning."
+            if SC_MARKER in k:
+                nk = k[k.index(SC_MARKER):]
+                if nk in out:
+                    raise ValueError(
+                        f"LoRA key re-normalization collision: {k!r} and an "
+                        f"earlier key both map to {nk!r}."
+                    )
+                out[nk] = v
+                continue
+
             bare = k
             for kp in KNOWN_PREFIXES:
                 if k.startswith(kp):

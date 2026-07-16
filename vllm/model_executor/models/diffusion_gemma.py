@@ -31,6 +31,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -81,9 +82,21 @@ class DiffusionGemmaSelfConditioning(nn.Module):
         super().__init__()
         self.pre_norm = RMSNorm(hidden_size, eps=eps)
         self.post_norm = RMSNorm(hidden_size, eps=eps, has_weight=False)
-        self.gate_proj = nn.Linear(hidden_size, self_conditioning_size, bias=False)
-        self.up_proj = nn.Linear(hidden_size, self_conditioning_size, bias=False)
-        self.down_proj = nn.Linear(self_conditioning_size, hidden_size, bias=False)
+        # ReplicatedLinear (not nn.Linear) so the LoRA manager can wrap these as
+        # ReplicatedLinearWithLoRA — the trainer adapts the self-conditioning MLP
+        # (self_conditioning.{gate,up,down}_proj) and that adapter must apply at
+        # serve to match training's self-conditioning feedback. Weights still load
+        # via the manual .data.copy_ in load_weights (.weight shape is unchanged);
+        # LoRA scope is opened by adding self_conditioning to get_mm_mapping.
+        self.gate_proj = ReplicatedLinear(
+            hidden_size, self_conditioning_size, bias=False
+        )
+        self.up_proj = ReplicatedLinear(
+            hidden_size, self_conditioning_size, bias=False
+        )
+        self.down_proj = ReplicatedLinear(
+            self_conditioning_size, hidden_size, bias=False
+        )
 
     def forward(
         self,
@@ -91,9 +104,9 @@ class DiffusionGemmaSelfConditioning(nn.Module):
         soft_embeds: torch.Tensor,
     ) -> torch.Tensor:
         x = self.pre_norm(soft_embeds)
-        sc_signal = self.down_proj(
-            F.gelu(self.gate_proj(x), approximate="tanh") * self.up_proj(x)
-        )
+        gate, _ = self.gate_proj(x)
+        up, _ = self.up_proj(x)
+        sc_signal, _ = self.down_proj(F.gelu(gate, approximate="tanh") * up)
         return self.post_norm(inputs_embeds + sc_signal)
 
 
@@ -316,7 +329,10 @@ class DiffusionGemmaForConditionalGeneration(
     def get_mm_mapping(self) -> MultiModelKeys:
         """Get the module prefix mapping for multimodal models."""
         return MultiModelKeys.from_string_field(
-            language_model="model",
+            # self_conditioning is a sibling of `model` (top-level), not under it,
+            # so it must be listed explicitly or the LoRA manager treats it as
+            # out-of-scope and ignores its adapter keys ("no matching PunicaWrapper").
+            language_model=["model", "self_conditioning"],
             connector=["embed_vision"],
             tower_model=["vision_tower"],
         )
