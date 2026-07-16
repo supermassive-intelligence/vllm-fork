@@ -239,8 +239,18 @@ class PTWorkerLoRAManager(LRUCacheWorkerLoRAManager):
             # Undo any previous prefix normalization: if the key starts
             # with a known vLLM prefix that isn't the target, strip it
             # back to bare "layers.*" then re-prefix.
+            #
+            # `model.decoder.layers.` is the DiffusionGemma trainer prefix:
+            # the trainer adapts the decoder (ADR 0007) and saves keys under
+            # `model.decoder.layers.*`, but the vLLM port collapses the tied
+            # encoder/decoder into a single `model.layers.*` backbone (its
+            # hf_to_vllm_mapper maps `model.decoder.` -> `model.`). Stripping
+            # `decoder.` here maps the decoder LoRA onto that shared backbone;
+            # without it the keys never match and the adapter is skipped as
+            # "zero base-module overlap". No-op for non-diffusion models.
             KNOWN_PREFIXES = (
                 "language_model.model.layers.",
+                "model.decoder.layers.",
                 "model.layers.",
             )
             bare = k

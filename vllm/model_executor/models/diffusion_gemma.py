@@ -59,6 +59,7 @@ from vllm.v1.worker.gpu.sample.penalties import use_penalty
 from vllm.v1.worker.gpu.states import RequestState
 
 from .interfaces import (
+    SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
     SupportsQuant,
@@ -143,6 +144,7 @@ class DiffusionGemmaForConditionalGeneration(
     SupportsMultiModal,
     SupportsQuant,
     SupportsPP,
+    SupportsLoRA,
 ):
     """DiffusionGemma for vLLM.
 
@@ -173,6 +175,16 @@ class DiffusionGemmaForConditionalGeneration(
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
+
+    # SupportsLoRA metadata. LoRA is confined to the language backbone (`self.model`,
+    # the shared Gemma4 encoder/decoder tower) by get_mm_mapping(language_model=
+    # "model"); the vision tower and connector are excluded. The ScalarLM trainer
+    # adapts the DECODER only (ADR 0007) and exports `.pt` keys under
+    # `model.decoder.layers.*`; hf_to_vllm_mapper's `model.decoder.` -> `model.`
+    # prefix rule (above) maps them onto this single backbone. No LoRA on the
+    # embeddings (canvas denoising doesn't adapt them).
+    embedding_modules: dict[str, str] = {}
+    embedding_padding_modules: list[str] = []
 
     @staticmethod
     def get_model_state_cls():
