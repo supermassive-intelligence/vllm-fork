@@ -240,17 +240,24 @@ class PTWorkerLoRAManager(LRUCacheWorkerLoRAManager):
             # with a known vLLM prefix that isn't the target, strip it
             # back to bare "layers.*" then re-prefix.
             #
-            # `model.decoder.layers.` is the DiffusionGemma trainer prefix:
-            # the trainer adapts the decoder (ADR 0007) and saves keys under
-            # `model.decoder.layers.*`, but the vLLM port collapses the tied
-            # encoder/decoder into a single `model.layers.*` backbone (its
-            # hf_to_vllm_mapper maps `model.decoder.` -> `model.`). Stripping
-            # `decoder.` here maps the decoder LoRA onto that shared backbone;
-            # without it the keys never match and the adapter is skipped as
-            # "zero base-module overlap". No-op for non-diffusion models.
+            # DiffusionGemma trainer prefix: the trainer adapts the decoder
+            # (ADR 0007) and saves keys under `model.decoder.layers.*`, but the
+            # vLLM port collapses the tied encoder/decoder into a single
+            # `model.layers.*` backbone (its hf_to_vllm_mapper maps
+            # `model.decoder.` -> `model.`). Stripping `decoder.` here maps the
+            # decoder LoRA onto that shared backbone; without it the keys never
+            # match and the adapter is skipped as "zero base-module overlap".
+            #
+            # NOTE the bare `decoder.layers.` form: pass-1 `normalize_lora_key`
+            # sees `model.decoder.layers.*`, fails its `model.layers.` /
+            # `model.language_model.` special-cases, and falls into the generic
+            # "strip leading `model.`" branch -> the key reaches us as
+            # `decoder.layers.*` (no `model.`). So we must match that form, not
+            # only `model.decoder.layers.`. No-op for non-diffusion models.
             KNOWN_PREFIXES = (
                 "language_model.model.layers.",
                 "model.decoder.layers.",
+                "decoder.layers.",
                 "model.layers.",
             )
             bare = k
