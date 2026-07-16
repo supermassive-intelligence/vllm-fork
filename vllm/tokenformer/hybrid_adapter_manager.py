@@ -357,6 +357,7 @@ class HybridAdapterManager:
         # LoRA half.
         if kind in ("lora", "hybrid"):
             if self._lora is None:
+                self._kinds.pop(lora_request.adapter_id, None)
                 raise RuntimeError(
                     f"Adapter {lora_request.adapter_id} at "
                     f"{loaded.source_path} contains LoRA tensors, but the "
@@ -364,7 +365,16 @@ class HybridAdapterManager:
                     f"LoRA-enabled vllm_config. Pass "
                     f"--enable-lora alongside --enable-tokenformer."
                 )
-            self._lora.add_adapter(lora_request)
+            try:
+                self._lora.add_adapter(lora_request)
+            except Exception:
+                # Don't leave a half-registered hybrid behind: a stale
+                # tokenformer half plus its _kinds entry would
+                # ghost-activate on later batches.
+                if kind == "hybrid":
+                    self._tokenformer.remove_adapter(lora_request.adapter_id)
+                self._kinds.pop(lora_request.adapter_id, None)
+                raise
 
         return True
 

@@ -89,7 +89,7 @@ def build_peft_helper_from_pt(
     *,
     lora_alpha: int | None = None,
     lora_alpha_multiplier: float = 2.0,
-    use_rslora: bool = False,
+    use_rslora: bool | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> PEFTHelper:
     """Construct a minimal `PEFTHelper` from a LoRA-only state dict slice.
@@ -100,8 +100,12 @@ def build_peft_helper_from_pt(
     embedded in the `.pt` file.
 
     Resolution order for `lora_alpha` / `use_rslora`:
-      1. Explicit kwarg (takes precedence so tests stay deterministic).
-      2. Value in `metadata` (what the trainer wrote into the `.pt`).
+      1. Explicit kwarg — `None` means "not specified", so an explicit
+         `use_rslora=False` really does override metadata.
+      2. Value in `metadata` (what the trainer wrote into the `.pt`),
+         type-checked: `use_rslora` must be a real bool (a trainer
+         writing the *string* "false" would otherwise enable RS-LoRA
+         via truthiness) and `lora_alpha` a real number.
       3. Default (`rank * lora_alpha_multiplier`, `use_rslora=False`).
 
     A warning is logged when the default is used — silently guessing
@@ -113,6 +117,13 @@ def build_peft_helper_from_pt(
     if lora_alpha is None:
         meta_alpha = metadata.get("lora_alpha")
         if meta_alpha is not None:
+            if isinstance(meta_alpha, bool) or not isinstance(
+                meta_alpha, (int, float)
+            ):
+                raise ValueError(
+                    f"metadata['lora_alpha'] must be a number, got "
+                    f"{type(meta_alpha).__name__}: {meta_alpha!r}"
+                )
             lora_alpha = int(meta_alpha)
         else:
             lora_alpha = int(r * lora_alpha_multiplier)
@@ -125,9 +136,16 @@ def build_peft_helper_from_pt(
                 lora_alpha_multiplier, lora_alpha,
             )
 
-    # use_rslora explicit arg wins; otherwise honor metadata; otherwise default.
-    if not use_rslora:
-        use_rslora = bool(metadata.get("use_rslora", False))
+    # use_rslora: explicit arg wins (including explicit False);
+    # otherwise honor metadata; otherwise default False.
+    if use_rslora is None:
+        meta_rslora = metadata.get("use_rslora", False)
+        if not isinstance(meta_rslora, bool):
+            raise ValueError(
+                f"metadata['use_rslora'] must be a bool, got "
+                f"{type(meta_rslora).__name__}: {meta_rslora!r}"
+            )
+        use_rslora = meta_rslora
 
     return PEFTHelper(
         r=r,

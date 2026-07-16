@@ -293,3 +293,34 @@ def test_load_lora_model_from_pt_real_torch(monkeypatch):
     assert helper.r == 16
     assert captured["device"] == "cpu"
     assert captured["tensors"] is sd
+
+
+def test_explicit_use_rslora_false_beats_metadata():
+    from vllm.tokenformer.lora_from_pt import build_peft_helper_from_pt
+
+    sd = {"q_proj.lora_A.weight": _fake_tensor((16, 4096))}
+    helper = build_peft_helper_from_pt(
+        sd, use_rslora=False, metadata={"use_rslora": True, "lora_alpha": 32}
+    )
+    # Plain LoRA scaling (alpha / r), not the RS-LoRA sqrt form.
+    assert helper.vllm_lora_scaling_factor == pytest.approx(
+        helper.lora_alpha / helper.r
+    )
+
+
+def test_metadata_use_rslora_string_raises():
+    from vllm.tokenformer.lora_from_pt import build_peft_helper_from_pt
+
+    sd = {"q_proj.lora_A.weight": _fake_tensor((16, 4096))}
+    # bool("false") is True — a stringly-typed trainer value must be
+    # rejected, not silently enable RS-LoRA.
+    with pytest.raises(ValueError, match="use_rslora.*bool"):
+        build_peft_helper_from_pt(sd, metadata={"use_rslora": "false"})
+
+
+def test_metadata_lora_alpha_string_raises():
+    from vllm.tokenformer.lora_from_pt import build_peft_helper_from_pt
+
+    sd = {"q_proj.lora_A.weight": _fake_tensor((16, 4096))}
+    with pytest.raises(ValueError, match="lora_alpha.*number"):
+        build_peft_helper_from_pt(sd, metadata={"lora_alpha": "64"})
