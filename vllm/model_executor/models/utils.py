@@ -1100,6 +1100,23 @@ def parse_diarized_speaker(speaker: str) -> str | None:
 
 _STATE_DICT_SCALE_SUFFIXES = ("._q_scale", "._k_scale", "._v_scale", "._prob_scale")
 
+# Process-wide switch for the ScalarLM trainer-export state_dict layout.
+# Off by default so vanilla flows that consume the canonical state dict
+# (sharded saves, dummy-weight init) are untouched; the tokenformer
+# adapter managers flip it on at construction, matching their own
+# process-lifetime scope. One-way by design: a process either serves
+# with the tokenformer subsystem or it doesn't.
+_scalarlm_state_dict_export = False
+
+
+def enable_scalarlm_state_dict_export() -> None:
+    global _scalarlm_state_dict_export
+    _scalarlm_state_dict_export = True
+
+
+def scalarlm_state_dict_export_enabled() -> bool:
+    return _scalarlm_state_dict_export
+
 
 def unpack_packed_modules_state_dict(
     state_dict: dict[str, torch.Tensor],

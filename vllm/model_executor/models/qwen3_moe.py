@@ -78,6 +78,7 @@ from .utils import (
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
+    scalarlm_state_dict_export_enabled,
     unpack_packed_modules_state_dict,
 )
 
@@ -676,6 +677,8 @@ class Qwen3MoeForCausalLM(
         # a wrapper module can't rewrite sibling modules' keys in the
         # shared destination dict.
         state_dict = super().state_dict(destination, prefix, keep_vars)
+        if not scalarlm_state_dict_export_enabled():
+            return state_dict
         return unpack_packed_modules_state_dict(
             state_dict,
             prefix=prefix,
