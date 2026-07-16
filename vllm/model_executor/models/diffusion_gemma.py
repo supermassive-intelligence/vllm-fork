@@ -284,7 +284,13 @@ class DiffusionGemmaForConditionalGeneration(
             getattr(config, "self_conditioning_size", None)
             or text_config.intermediate_size
         )
-        self.self_conditioning = DiffusionGemmaSelfConditioning(
+        # Attach the self-conditioning MLP ONTO the backbone so its modules
+        # live at `model.self_conditioning.*`. vLLM's multimodal-LoRA path
+        # allows exactly one `language_model` tower and routes modules to it by
+        # prefix; homing self_conditioning under the `model.` prefix brings its
+        # adapter into scope without a second (illegal) tower and keeps lm_head
+        # out of LoRA scope.
+        self.model.self_conditioning = DiffusionGemmaSelfConditioning(
             hidden_size=text_config.hidden_size,
             self_conditioning_size=sc_size,
             eps=getattr(text_config, "rms_norm_eps", 1e-6),
@@ -303,7 +309,7 @@ class DiffusionGemmaForConditionalGeneration(
         soft_embeds = torch.matmul(
             probs.to(embed_weight.dtype), embed_weight
         ) * self.model.normalizer.to(inputs_embeds.dtype)
-        return self.self_conditioning(inputs_embeds, soft_embeds)
+        return self.model.self_conditioning(inputs_embeds, soft_embeds)
 
     # ------------------------------------------------------------------ #
     # Multimodal: reuse Gemma4's image parsing, processing & embedding
@@ -329,10 +335,11 @@ class DiffusionGemmaForConditionalGeneration(
     def get_mm_mapping(self) -> MultiModelKeys:
         """Get the module prefix mapping for multimodal models."""
         return MultiModelKeys.from_string_field(
-            # self_conditioning is a sibling of `model` (top-level), not under it,
-            # so it must be listed explicitly or the LoRA manager treats it as
-            # out-of-scope and ignores its adapter keys ("no matching PunicaWrapper").
-            language_model=["model", "self_conditioning"],
+            # self_conditioning is homed under the backbone (`model.`), so a
+            # single language_model tower covers both the decoder and the
+            # self-conditioning MLP. vLLM asserts exactly one language_model
+            # entry, so it MUST stay a single prefix.
+            language_model="model",
             connector=["embed_vision"],
             tower_model=["vision_tower"],
         )
@@ -385,7 +392,7 @@ class DiffusionGemmaForConditionalGeneration(
         sc_params = dict(
             (n, p)
             for n, p in self.named_parameters()
-            if n.startswith("self_conditioning.")
+            if n.startswith("model.self_conditioning.")
         )
 
         # Collect vision tower + embedder parameters AND buffers for manual
@@ -408,10 +415,11 @@ class DiffusionGemmaForConditionalGeneration(
             seen_weights: set[str] = set()
             for name, weight in weights:
                 # Self-conditioning lives under model.decoder.self_conditioning.*
-                # in the checkpoint but at self_conditioning.* in our model.
+                # in the checkpoint but at model.self_conditioning.* in our model
+                # (homed under the backbone for single-tower LoRA scope).
                 if "self_conditioning" in name:
                     sc_name = name.split("self_conditioning.", 1)[1]
-                    sc_name = "self_conditioning." + sc_name
+                    sc_name = "model.self_conditioning." + sc_name
                     if sc_name in sc_params:
                         sc_params[sc_name].data.copy_(weight)
                     continue
@@ -953,7 +961,7 @@ class DiffusionGemmaModelState(ModelState):
             end = int(query_start_loc_np[idx + 1])
             canvas = slice(start, end)
             soft = sc_embeds[slot, : end - start]
-            inputs_embeds[canvas] = self.model.self_conditioning(
+            inputs_embeds[canvas] = self.model.model.self_conditioning(
                 inputs_embeds[canvas], soft.to(inputs_embeds.dtype)
             )
 
