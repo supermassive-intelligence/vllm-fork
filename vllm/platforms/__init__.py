@@ -180,10 +180,13 @@ def cpu_platform_plugin() -> str | None:
         # SCALARLM FIX: Enable CPU platform on Linux when VLLM_TARGET_DEVICE=cpu
         if not is_cpu:
             import os
+
             if os.environ.get("VLLM_TARGET_DEVICE") == "cpu":
                 is_cpu = True
-                logger.debug("Confirmed CPU platform is available because"
-                             " VLLM_TARGET_DEVICE=cpu is set.")
+                logger.debug(
+                    "Confirmed CPU platform is available because"
+                    " VLLM_TARGET_DEVICE=cpu is set."
+                )
 
     except Exception as e:
         logger.debug("CPU platform is not available because: %s", str(e))

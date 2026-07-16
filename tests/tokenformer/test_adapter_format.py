@@ -20,7 +20,6 @@ from vllm.tokenformer.adapter_format import (
     split_adapter_state_dict,
 )
 
-
 # --- classification -----------------------------------------------------
 
 
@@ -94,10 +93,7 @@ def test_has_tokenformer_keys_matches_leaf_only():
     # The match is on the leaf segment, not substring, so a key that
     # contains "tokenformer_k" mid-path should NOT match.
     assert has_tokenformer_keys(["mlp.tokenformer_k"]) is True
-    assert (
-        has_tokenformer_keys(["mlp.tokenformer_k.extra"])
-        is False
-    )
+    assert has_tokenformer_keys(["mlp.tokenformer_k.extra"]) is False
 
 
 def test_has_lora_keys_requires_delimited_segment():
@@ -147,9 +143,7 @@ def test_normalize_swaps_gemma4_language_model_prefix():
     (extra `.model.` nesting). HF has `model.language_model.layers.*`.
     We swap them so LoRA keys land on the right modules.
     """
-    trainer_key = (
-        "model.language_model.layers.0.self_attn.q_proj.lora_A.default.weight"
-    )
+    trainer_key = "model.language_model.layers.0.self_attn.q_proj.lora_A.default.weight"
     assert normalize_lora_key(trainer_key) == (
         "language_model.model.layers.0.self_attn.q_proj.lora_A.weight"
     )
@@ -168,9 +162,7 @@ def test_normalize_strips_top_level_model_prefix_for_vision():
 
 
 def test_normalize_strips_top_level_model_prefix_for_embed_vision():
-    trainer_key = (
-        "model.embed_vision.embedding_projection.lora_A.default.weight"
-    )
+    trainer_key = "model.embed_vision.embedding_projection.lora_A.default.weight"
     assert normalize_lora_key(trainer_key) == (
         "embed_vision.embedding_projection.lora_A.weight"
     )
@@ -204,8 +196,10 @@ def test_split_strips_clippable_linear_wrapper():
     module and its LoRA weights; the normalizer must remove it.
     vision_tower lives at the top level (no `.model.` swap)."""
     sd = {
-        "model.vision_tower.encoder.layers.0.self_attn.q_proj.linear.lora_A.default.weight": "A",
-        "model.vision_tower.encoder.layers.0.mlp.gate_proj.linear.lora_B.default.weight": "B",
+        "model.vision_tower.encoder.layers.0.self_attn.q_proj"
+        ".linear.lora_A.default.weight": "A",
+        "model.vision_tower.encoder.layers.0.mlp.gate_proj"
+        ".linear.lora_B.default.weight": "B",
     }
     _, lora_sd = split_adapter_state_dict(sd)
     assert set(lora_sd) == {
@@ -379,7 +373,9 @@ def test_load_adapter_from_pt_real_pt_hybrid(tmp_path):
     torch = _torch_or_skip()
     sd = {
         "model.layers.0.mlp.tokenformer_p": torch.zeros(4, 4),
-        "model.language_model.layers.0.self_attn.q_proj.lora_B.weight": torch.zeros(8, 4),
+        "model.language_model.layers.0.self_attn.q_proj.lora_B.weight": torch.zeros(
+            8, 4
+        ),
         "lm_head.weight": torch.zeros(16, 4),
     }
     torch.save({"model_state_dict": sd}, tmp_path / "adapter.pt")

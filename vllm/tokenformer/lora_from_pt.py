@@ -117,9 +117,7 @@ def build_peft_helper_from_pt(
     if lora_alpha is None:
         meta_alpha = metadata.get("lora_alpha")
         if meta_alpha is not None:
-            if isinstance(meta_alpha, bool) or not isinstance(
-                meta_alpha, (int, float)
-            ):
+            if isinstance(meta_alpha, bool) or not isinstance(meta_alpha, (int, float)):
                 raise ValueError(
                     f"metadata['lora_alpha'] must be a number, got "
                     f"{type(meta_alpha).__name__}: {meta_alpha!r}"
@@ -130,10 +128,11 @@ def build_peft_helper_from_pt(
             logger.warning(
                 "LoRA adapter has no `lora_alpha` in its metadata; "
                 "defaulting to rank * %g = %d. If the adapter was trained "
-                "with a different alpha the delta will be mis-scaled. "
+                "with a different alpha the delta will be scaled incorrectly. "
                 "Bake `lora_alpha` into the .pt metadata dict to silence "
                 "this warning.",
-                lora_alpha_multiplier, lora_alpha,
+                lora_alpha_multiplier,
+                lora_alpha,
             )
 
     # use_rslora: explicit arg wins (including explicit False);
@@ -159,8 +158,8 @@ def load_lora_model_from_pt(
     lora_sd: dict[str, Any],
     *,
     lora_model_id: int,
-    device: "str | torch.device" = "cuda",
-    dtype: "torch.dtype | None" = None,
+    device: str | torch.device = "cuda",
+    dtype: torch.dtype | None = None,
     model_vocab_size: int | None = None,
     peft_helper: PEFTHelper | None = None,
     metadata: dict[str, Any] | None = None,
@@ -201,7 +200,10 @@ def load_lora_model_from_pt(
     logger.info(
         "Loading LoRA adapter %s from .pt state-dict slice: "
         "rank=%d, alpha=%d, %d tensors.",
-        lora_model_id, peft_helper.r, peft_helper.lora_alpha, len(lora_sd),
+        lora_model_id,
+        peft_helper.r,
+        peft_helper.lora_alpha,
+        len(lora_sd),
     )
     return LoRAModel.from_lora_tensors(
         lora_model_id=lora_model_id,
