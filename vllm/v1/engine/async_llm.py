@@ -1085,34 +1085,28 @@ class AsyncLLM(EngineClient):
     async def get_current_kv_cache_size(self) -> int:
         """Get the number of free KV cache tokens available.
 
-        This method queries the v1 engine core to determine how many tokens
-        worth of KV cache memory is currently available. Used by ScalarLM
-        for dynamic batch sizing.
+        Queries the v1 engine core; used by ScalarLM for dynamic batch
+        sizing. Engine/transport failures propagate — masking a dead
+        engine as "0 free tokens" would make the caller treat it as
+        ordinary cache pressure and retry forever instead of
+        triggering recovery.
 
         Returns:
             int: Number of free tokens available in KV cache
         """
-        try:
-            return await self.engine_core.get_free_kv_cache_tokens_async()
-        except Exception as e:
-            logger.warning("Failed to get free KV cache tokens: %s", e)
-            return 0
+        return await self.engine_core.get_free_kv_cache_tokens_async()
 
     async def get_total_kv_cache_tokens(self) -> int:
-        """Get the number of total KV cache tokens available.
+        """Get the total number of KV cache tokens configured.
 
-        This method queries the v1 engine core to determine how many tokens
-        worth of KV cache memory is currently available. Used by ScalarLM
-        for dynamic batch sizing.
+        Queries the v1 engine core; used by ScalarLM for dynamic batch
+        sizing. Engine/transport failures propagate — see
+        get_current_kv_cache_size.
 
         Returns:
-            int: Number of free tokens available in KV cache
+            int: Total number of tokens available in KV cache
         """
-        try:
-            return await self.engine_core.get_total_kv_cache_tokens_async()
-        except Exception as e:
-            logger.warning("Failed to get free KV cache tokens: %s", e)
-            return 0
+        return await self.engine_core.get_total_kv_cache_tokens_async()
 
     @property
     def is_running(self) -> bool:
