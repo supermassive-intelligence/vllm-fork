@@ -353,6 +353,10 @@ class EngineCore:
         This method queries the scheduler's KV cache manager to determine
         how many tokens worth of KV cache memory is currently available.
 
+        Advisory heuristic only: uses KV cache group 0's block size (a
+        hybrid-cache model's other groups may differ), and with internal
+        DP load balancing the client aggregates only rank 0's value.
+
         Returns:
             int: Number of free tokens available in KV cache
         """
@@ -379,6 +383,8 @@ class EngineCore:
 
         This method queries the scheduler's KV cache manager to determine
         how many tokens worth of KV cache memory is currently configured.
+
+        Advisory heuristic only — see get_free_kv_cache_tokens.
 
         Returns:
             int: Total number of tokens available in KV cache
