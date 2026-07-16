@@ -154,7 +154,7 @@ Non-goals (for v1):
 Introduce a composite manager that owns a LoRA manager and a Tokenformer
 manager and routes calls by adapter kind:
 
-```
+```text
 HybridAdapterManager
 ├── LoRAModelManager         (per-request, many slots)
 └── TokenformerModelManager  (global, one active)
@@ -206,7 +206,7 @@ def classify_adapter(state_dict: dict[str, Tensor]) -> tuple[bool, bool]:
 Four possible shapes:
 
 | has_tokenformer | has_lora | Classification |
-|---|---|---|
+| --- | --- | --- |
 | true | false | pure Tokenformer |
 | false | true | pure LoRA |
 | true | true | hybrid |
@@ -275,7 +275,7 @@ dummy request ever leaks into the tokenformer path.
 
 Introduce one new flag:
 
-```
+```text
 --enable-tokenformer           # default: false
 ```
 

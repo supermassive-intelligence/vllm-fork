@@ -31,11 +31,10 @@ def patched_manager(monkeypatch):
     @contextmanager
     def _dummy_cache():
         yield
+
     fake_tk.dummy_lora_cache.side_effect = _dummy_cache
 
-    monkeypatch.setattr(
-        mod, "TokenformerModelManager", lambda model, device: fake_tk
-    )
+    monkeypatch.setattr(mod, "TokenformerModelManager", lambda model, device: fake_tk)
 
     mgr = mod.HybridAdapterManager(model=object(), device="cpu")
     return mgr, fake_tk
@@ -43,8 +42,7 @@ def patched_manager(monkeypatch):
 
 def _fake_loaded(kind, path="/tmp/fake-adapter"):
     """Minimal stand-in for LoadedAdapter."""
-    return SimpleNamespace(kind=kind, source_path=path,
-                           tokenformer_sd={}, lora_sd={})
+    return SimpleNamespace(kind=kind, source_path=path, tokenformer_sd={}, lora_sd={})
 
 
 def test_model_property_forwards_to_tokenformer(patched_manager):
@@ -55,8 +53,10 @@ def test_model_property_forwards_to_tokenformer(patched_manager):
 def test_add_tokenformer_adapter_delegates(patched_manager, monkeypatch):
     mgr, fake_tk = patched_manager
     import vllm.tokenformer.hybrid_adapter_manager as mod
+
     monkeypatch.setattr(
-        mod, "load_adapter_from_pt",
+        mod,
+        "load_adapter_from_pt",
         lambda _p: _fake_loaded("tokenformer"),
     )
     fake_tk.add_adapter.return_value = True
@@ -76,8 +76,10 @@ def test_add_lora_or_hybrid_without_lora_submanager_raises(
     adapters with a clear message pointing at the missing flag."""
     mgr, _ = patched_manager
     import vllm.tokenformer.hybrid_adapter_manager as mod
+
     monkeypatch.setattr(
-        mod, "load_adapter_from_pt",
+        mod,
+        "load_adapter_from_pt",
         lambda _p: _fake_loaded(kind),
     )
     req = SimpleNamespace(adapter_id=9, lora_path="/tmp/a")
@@ -85,18 +87,14 @@ def test_add_lora_or_hybrid_without_lora_submanager_raises(
         mgr.add_adapter(req)
 
 
-def test_add_adapter_resolves_path_before_classification(
-    patched_manager, monkeypatch
-):
+def test_add_adapter_resolves_path_before_classification(patched_manager, monkeypatch):
     """The classification load must open the same directory the
     sub-managers resolve to (HF-hub ids, relative paths)."""
     mgr, fake_tk = patched_manager
     import vllm.tokenformer.hybrid_adapter_manager as mod
 
     seen = {}
-    monkeypatch.setattr(
-        mod, "get_adapter_absolute_path", lambda p: f"/resolved{p}"
-    )
+    monkeypatch.setattr(mod, "get_adapter_absolute_path", lambda p: f"/resolved{p}")
 
     def _fake_load(path):
         seen["path"] = path
@@ -118,8 +116,10 @@ def test_set_active_adapters_forwards(patched_manager):
 def test_activate_tokenformer_routes_to_tokenformer(patched_manager, monkeypatch):
     mgr, fake_tk = patched_manager
     import vllm.tokenformer.hybrid_adapter_manager as mod
+
     monkeypatch.setattr(
-        mod, "load_adapter_from_pt",
+        mod,
+        "load_adapter_from_pt",
         lambda _p: _fake_loaded("tokenformer"),
     )
     mgr.add_adapter(SimpleNamespace(adapter_id=3, lora_path="/tmp/a"))
@@ -141,8 +141,10 @@ def test_activate_unknown_id_falls_back_to_tokenformer(patched_manager):
 def test_remove_all_adapters_clears_kinds(patched_manager, monkeypatch):
     mgr, fake_tk = patched_manager
     import vllm.tokenformer.hybrid_adapter_manager as mod
+
     monkeypatch.setattr(
-        mod, "load_adapter_from_pt",
+        mod,
+        "load_adapter_from_pt",
         lambda _p: _fake_loaded("tokenformer"),
     )
     mgr.add_adapter(SimpleNamespace(adapter_id=11, lora_path="/tmp/a"))
@@ -156,8 +158,10 @@ def test_remove_all_adapters_clears_kinds(patched_manager, monkeypatch):
 def test_remove_adapter_drops_kind(patched_manager, monkeypatch):
     mgr, fake_tk = patched_manager
     import vllm.tokenformer.hybrid_adapter_manager as mod
+
     monkeypatch.setattr(
-        mod, "load_adapter_from_pt",
+        mod,
+        "load_adapter_from_pt",
         lambda _p: _fake_loaded("tokenformer"),
     )
     mgr.add_adapter(SimpleNamespace(adapter_id=5, lora_path="/tmp/a"))
@@ -214,6 +218,7 @@ def full_manager(monkeypatch):
     @contextmanager
     def _dummy_cache():
         yield
+
     fake_tk.dummy_lora_cache.side_effect = _dummy_cache
 
     fake_lora = MagicMock()
@@ -225,11 +230,10 @@ def full_manager(monkeypatch):
     )
     fake_lora.create_lora_manager.return_value = lora_wrapped
 
+    monkeypatch.setattr(mod, "TokenformerModelManager", lambda model, device: fake_tk)
     monkeypatch.setattr(
-        mod, "TokenformerModelManager", lambda model, device: fake_tk
-    )
-    monkeypatch.setattr(
-        mod, "PTWorkerLoRAManager",
+        mod,
+        "PTWorkerLoRAManager",
         lambda vllm_config, device, embedding_modules: fake_lora,
     )
 
@@ -238,7 +242,9 @@ def full_manager(monkeypatch):
     base_model = SimpleNamespace(embedding_modules={})
 
     mgr = mod.HybridAdapterManager(
-        model=base_model, device="cpu", vllm_config=vllm_config,
+        model=base_model,
+        device="cpu",
+        vllm_config=vllm_config,
     )
     return mgr, fake_tk, fake_lora, lora_wrapped
 
@@ -259,8 +265,10 @@ def test_hybrid_init_runs_lora_then_tokenformer(full_manager):
 def test_add_lora_routes_only_to_lora(full_manager, monkeypatch):
     mgr, fake_tk, fake_lora, _ = full_manager
     import vllm.tokenformer.hybrid_adapter_manager as mod
+
     monkeypatch.setattr(
-        mod, "load_adapter_from_pt",
+        mod,
+        "load_adapter_from_pt",
         lambda _p: _fake_loaded("lora"),
     )
     req = SimpleNamespace(adapter_id=11, lora_path="/tmp/a")
@@ -274,8 +282,10 @@ def test_add_lora_routes_only_to_lora(full_manager, monkeypatch):
 def test_add_hybrid_routes_to_both(full_manager, monkeypatch):
     mgr, fake_tk, fake_lora, _ = full_manager
     import vllm.tokenformer.hybrid_adapter_manager as mod
+
     monkeypatch.setattr(
-        mod, "load_adapter_from_pt",
+        mod,
+        "load_adapter_from_pt",
         lambda _p: _fake_loaded("hybrid"),
     )
     req = SimpleNamespace(adapter_id=21, lora_path="/tmp/a")
@@ -368,9 +378,7 @@ def test_pin_adapter_routes_by_kind(full_manager, monkeypatch):
         mod, "load_adapter_from_pt", lambda _p: _fake_loaded("tokenformer")
     )
     mgr.add_adapter(SimpleNamespace(adapter_id=10, lora_path="/t"))
-    monkeypatch.setattr(
-        mod, "load_adapter_from_pt", lambda _p: _fake_loaded("lora")
-    )
+    monkeypatch.setattr(mod, "load_adapter_from_pt", lambda _p: _fake_loaded("lora"))
     mgr.add_adapter(SimpleNamespace(adapter_id=20, lora_path="/l"))
 
     fake_tk.pin_adapter.reset_mock()
@@ -391,8 +399,10 @@ def test_pin_adapter_routes_by_kind(full_manager, monkeypatch):
 def test_remove_all_clears_both(full_manager, monkeypatch):
     mgr, fake_tk, fake_lora, _ = full_manager
     import vllm.tokenformer.hybrid_adapter_manager as mod
+
     monkeypatch.setattr(
-        mod, "load_adapter_from_pt",
+        mod,
+        "load_adapter_from_pt",
         lambda _p: _fake_loaded("hybrid"),
     )
     mgr.add_adapter(SimpleNamespace(adapter_id=5, lora_path="/tmp/a"))
@@ -410,9 +420,7 @@ def test_add_adapter_rolls_back_on_lora_half_failure(full_manager, monkeypatch):
     mgr, fake_tk, fake_lora, _ = full_manager
     import vllm.tokenformer.hybrid_adapter_manager as mod
 
-    monkeypatch.setattr(
-        mod, "load_adapter_from_pt", lambda _p: _fake_loaded("hybrid")
-    )
+    monkeypatch.setattr(mod, "load_adapter_from_pt", lambda _p: _fake_loaded("hybrid"))
     fake_lora.add_adapter.side_effect = RuntimeError("punica says no")
 
     with pytest.raises(RuntimeError, match="punica says no"):

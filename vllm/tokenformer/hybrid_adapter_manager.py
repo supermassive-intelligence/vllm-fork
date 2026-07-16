@@ -30,7 +30,6 @@ from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.tokenformer.adapter_format import (
     AdapterKind,
     load_adapter_from_pt,
-    normalize_lora_state_dict,
 )
 from vllm.tokenformer.lora_from_pt import load_lora_model_from_pt
 from vllm.tokenformer.tokenformer_model_manager import TokenformerModelManager
@@ -56,7 +55,7 @@ class PTWorkerLoRAManager(LRUCacheWorkerLoRAManager):
     dummy-lora caching are inherited.
     """
 
-    def _load_adapter(self, lora_request: "LoRARequest") -> "LoRAModel":
+    def _load_adapter(self, lora_request: LoRARequest) -> LoRAModel:
         # Prefer `.pt`. If there's no .pt in the dir, delegate to the
         # upstream PEFT path so users with standard HF LoRA checkpoints
         # keep working on the same server.
@@ -89,16 +88,12 @@ class PTWorkerLoRAManager(LRUCacheWorkerLoRAManager):
             lora_model_id=lora_request.adapter_id,
             device=self.device,
             dtype=(
-                self.lora_config.lora_dtype
-                if self.lora_config is not None
-                else None
+                self.lora_config.lora_dtype if self.lora_config is not None else None
             ),
             model_vocab_size=self.vocab_size,
             metadata=loaded.metadata,
             max_lora_rank=(
-                self.lora_config.max_lora_rank
-                if self.lora_config is not None
-                else None
+                self.lora_config.max_lora_rank if self.lora_config is not None else None
             ),
         )
         self._warn_on_zero_base_match(lora_model, loaded.source_path)
@@ -158,14 +153,11 @@ class PTWorkerLoRAManager(LRUCacheWorkerLoRAManager):
         except Exception:
             pass
         logger.debug(
-            "Could not detect model layers prefix; defaulting to "
-            "model.layers."
+            "Could not detect model layers prefix; defaulting to model.layers."
         )
         return "model.layers."
 
-    def _renormalize_lora_sd_for_model(
-        self, lora_sd: dict
-    ) -> dict:
+    def _renormalize_lora_sd_for_model(self, lora_sd: dict) -> dict:
         """Re-run key normalization using the live model's prefix.
 
         ``adapter_format.normalize_lora_key`` uses a static rule that
@@ -201,12 +193,12 @@ class PTWorkerLoRAManager(LRUCacheWorkerLoRAManager):
             bare = k
             for kp in KNOWN_PREFIXES:
                 if k.startswith(kp):
-                    bare = "layers." + k[len(kp):]
+                    bare = "layers." + k[len(kp) :]
                     break
 
             # Re-prefix with the correct target
             if bare.startswith("layers."):
-                nk = target_prefix + bare[len("layers."):]
+                nk = target_prefix + bare[len("layers.") :]
             else:
                 nk = k  # non-layers key (vision_tower, embed_vision, …)
 
@@ -239,8 +231,9 @@ class PTWorkerLoRAManager(LRUCacheWorkerLoRAManager):
             # wired during some tests), skip the check silently.
             return
 
-        lora_modules = set(lora_model.loras.keys()) if hasattr(
-            lora_model, "loras") else set()
+        lora_modules = (
+            set(lora_model.loras.keys()) if hasattr(lora_model, "loras") else set()
+        )
         if not lora_modules:
             return
 
@@ -252,16 +245,19 @@ class PTWorkerLoRAManager(LRUCacheWorkerLoRAManager):
         # caller a sample from each side so they can eyeball the
         # transform that's missing.
         sample_lora = sorted(lora_modules)[:3]
-        sample_base = sorted(
-            m for m in base_modules if "self_attn" in m or "mlp" in m
-        )[:3]
+        sample_base = sorted(m for m in base_modules if "self_attn" in m or "mlp" in m)[
+            :3
+        ]
         logger.warning(
             "LoRA adapter at %s loaded but NONE of its %d module paths "
             "match the base model. The adapter will silently have no "
             "effect at inference. Sample adapter keys: %s. Sample "
             "base-model modules: %s. Check your trainer-side key "
             "naming or add a rule to normalize_lora_key.",
-            source_path, len(lora_modules), sample_lora, sample_base,
+            source_path,
+            len(lora_modules),
+            sample_lora,
+            sample_base,
         )
 
 
@@ -276,9 +272,9 @@ class HybridAdapterManager:
 
     def __init__(
         self,
-        model: "nn.Module",
-        device: "torch.device",
-        vllm_config: "VllmConfig | None" = None,
+        model: nn.Module,
+        device: torch.device,
+        vllm_config: VllmConfig | None = None,
     ):
         """Instantiate both sub-managers.
 
@@ -294,11 +290,10 @@ class HybridAdapterManager:
         keeps the skeleton path alive for callers that haven't flipped
         to hybrid yet.
         """
-        lora_enabled = (
-            vllm_config is not None and vllm_config.lora_config is not None
-        )
+        lora_enabled = vllm_config is not None and vllm_config.lora_config is not None
 
         if lora_enabled:
+            assert vllm_config is not None  # implied by lora_enabled
             # LoRA sub-manager replaces targeted linears with *WithLoRA
             # wrappers, returning the transformed model. We then feed
             # that into the Tokenformer surgeon.
@@ -318,7 +313,7 @@ class HybridAdapterManager:
     # --- model handle exposed to the runner -----------------------------
 
     @property
-    def model(self) -> "nn.Module":
+    def model(self) -> nn.Module:
         # Today this is the Tokenformer-wrapped model. When the LoRA
         # sub-manager arrives, order will be: apply LoRA layer
         # replacement first, then Tokenformer surgeon on top — so this
@@ -456,8 +451,7 @@ class HybridAdapterManager:
                 lora_side_mapping = replace(
                     lora_mapping,
                     index_mapping=tuple(
-                        0 if i in tk_only_ids else i
-                        for i in lora_mapping.index_mapping
+                        0 if i in tk_only_ids else i for i in lora_mapping.index_mapping
                     ),
                     prompt_mapping=tuple(
                         0 if i in tk_only_ids else i

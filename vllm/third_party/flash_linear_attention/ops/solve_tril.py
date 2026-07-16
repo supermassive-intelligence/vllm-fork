@@ -40,9 +40,10 @@ try:
         class TorchAllocator:
             def get(self):
                 def torch_alloc_fn(size, alignment, stream):
-                    device = torch.cuda.current_device()
-                    with torch.cuda.device(device):
+                    device = torch.accelerator.current_device_index()
+                    with torch.accelerator.device_index(device):
                         return torch.cuda.caching_allocator_alloc(size, device)
+
                 return torch_alloc_fn
 
         _allocation._allocator = TorchAllocator()

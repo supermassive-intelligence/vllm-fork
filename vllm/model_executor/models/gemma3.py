@@ -450,7 +450,7 @@ class Gemma3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsTokenformer
         )
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
-    def state_dict(self, destination=None, prefix='', keep_vars=False):
+    def state_dict(self, destination=None, prefix="", keep_vars=False):
         # ScalarLM trainer contract: expose packed projections under
         # their unpacked HF names. Scoped to `prefix` so recursion from
         # a wrapper module (e.g. multimodal gemma3) can't rewrite

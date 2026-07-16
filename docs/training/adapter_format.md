@@ -71,8 +71,8 @@ logs at WARN level when it does so, so trainers can spot unexpected
 defaulting.
 
 | key | type | default | notes |
-|---|---|---|---|
-| `lora_alpha` | int | `2 * rank` | LoRA scaling numerator. If this is wrong, the delta is silently mis-scaled, so we recommend always setting it. |
+| --- | --- | --- | --- |
+| `lora_alpha` | int | `2 * rank` | LoRA scaling numerator. If this is wrong, the delta is incorrectly scaled, so we recommend always setting it. |
 | `use_rslora` | bool | `false` | Rank-stabilized LoRA. Changes scaling to `lora_alpha / sqrt(rank)`. |
 
 No `target_modules` field — vLLM figures out packing from the model's

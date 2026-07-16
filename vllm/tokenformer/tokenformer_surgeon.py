@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from abc import abstractmethod, ABC
-import torch
-from torch import nn
 import math
 import os
+
+import torch
+from torch import nn
 
 from vllm.logger import init_logger
 
@@ -87,7 +87,6 @@ class TokenformerAdapter(nn.Module):
         return results
 
     def tokenformer_op(self, query: torch.Tensor) -> torch.Tensor:
-
         q = query.view(
             -1, self.num_heads, self.hidden_size // self.num_heads
         ).transpose(0, 1)
@@ -157,8 +156,7 @@ _NON_LANGUAGE_PATH_COMPONENTS = frozenset(
 )
 
 
-class TokenformerSurgeon(ABC):
-
+class TokenformerSurgeon:
     def __init__(self, model: nn.Module, device: torch.device):
         self.model = model
         self.device = device
@@ -195,7 +193,7 @@ class TokenformerSurgeon(ABC):
         if not self._is_adapter_layer(name):
             return
 
-        logger.info(f"Wrapping layer {name} with TokenformerAdapter")
+        logger.info("Wrapping layer %s with TokenformerAdapter", name)
 
         hidden_size = self._get_language_hidden_size()
         if hidden_size is None:
