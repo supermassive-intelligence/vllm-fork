@@ -1016,9 +1016,7 @@ def unpack_packed_modules_state_dict(
     # Inside a running engine TP is always initialized; out-of-engine
     # callers (unit tests, offline tooling) hold the full weights.
     tp_size = (
-        get_tensor_model_parallel_world_size()
-        if model_parallel_is_initialized()
-        else 1
+        get_tensor_model_parallel_world_size() if model_parallel_is_initialized() else 1
     )
 
     def _qkv_split_sizes() -> list[int]:
@@ -1046,7 +1044,9 @@ def unpack_packed_modules_state_dict(
             tensor = state_dict.pop(key)
             logger.debug(
                 "Unpacking %s into %s, original size: %s",
-                key, unpacked_keys, tensor.shape,
+                key,
+                unpacked_keys,
+                tensor.shape,
             )
             parts = _split(tensor, packed_key, len(unpacked_keys))
             for unpacked_key, part in zip(unpacked_keys, parts):
