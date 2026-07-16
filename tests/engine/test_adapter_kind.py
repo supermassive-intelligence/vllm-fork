@@ -67,3 +67,46 @@ def test_lora_config_mirrors_flags():
     assert cfg.enable_lora is True
     assert cfg.enable_tokenformer is True
     assert _select_adapter_kind(cfg) == "hybrid"
+
+
+def test_cli_tokenformer_alone_builds_lora_config():
+    """Regression: --enable-tokenformer without --enable-lora used to
+    feed enable_lora=None (upstream's BooleanOptionalAction has no
+    default) into LoRAConfig's strict bool field, so `vllm serve
+    --enable-tokenformer` failed pydantic validation before the engine
+    even started. create_engine_config now coerces with bool()."""
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    ns = parser.parse_args(["--model", "dummy", "--enable-tokenformer"])
+    args = EngineArgs.from_cli_args(ns)
+    assert args.enable_lora is None  # upstream parse behavior, unchanged
+    cfg = LoRAConfig(
+        enable_lora=bool(args.enable_lora),
+        enable_tokenformer=args.enable_tokenformer,
+    )
+    assert cfg.enable_lora is False
+    assert cfg.enable_tokenformer is True
+    assert _select_adapter_kind(cfg) == "tokenformer"
+
+
+def test_compute_hash_distinguishes_adapter_kinds():
+    """lora-only, tokenformer-only, and hybrid wrap the model
+    differently (LoRA layer wrappers vs surgeon vs both), so their
+    compile-cache hashes must differ."""
+    lora = LoRAConfig(enable_lora=True, enable_tokenformer=False)
+    tokenformer = LoRAConfig(enable_lora=False, enable_tokenformer=True)
+    hybrid = LoRAConfig(enable_lora=True, enable_tokenformer=True)
+    hashes = {
+        lora.compute_hash(),
+        tokenformer.compute_hash(),
+        hybrid.compute_hash(),
+    }
+    assert len(hashes) == 3
+
+
+def test_compute_hash_tracks_tokenformer_shape_env(monkeypatch):
+    """TOKENFORMER_NUM_HEADS / TOKENFORMER_R size the surgeon's adapter
+    parameters, so changing them must invalidate the compile cache."""
+    monkeypatch.delenv("TOKENFORMER_R", raising=False)
+    base = LoRAConfig(enable_tokenformer=True).compute_hash()
+    monkeypatch.setenv("TOKENFORMER_R", "64")
+    assert LoRAConfig(enable_tokenformer=True).compute_hash() != base
