@@ -79,8 +79,8 @@ from .utils import (
     unpack_packed_modules_state_dict,
 )
 
-
 logger = init_logger(__name__)
+
 
 class Qwen2MLP(nn.Module):
     def __init__(
@@ -512,7 +512,7 @@ class Qwen2ForCausalLM(
         )
         return loader.load_weights(weights)
 
-    def state_dict(self, destination=None, prefix='', keep_vars=False):
+    def state_dict(self, destination=None, prefix="", keep_vars=False):
         # ScalarLM trainer contract: expose packed projections under
         # their unpacked HF names. Scoped to `prefix` so recursion from
         # a wrapper module can't rewrite sibling modules' keys in the

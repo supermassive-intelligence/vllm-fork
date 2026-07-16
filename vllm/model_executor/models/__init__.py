@@ -11,10 +11,10 @@ from .interfaces import (
     SupportsTranscription,
     has_inner_state,
     supports_lora,
-    supports_tokenformer,
     supports_mrope,
     supports_multimodal,
     supports_pp,
+    supports_tokenformer,
     supports_transcription,
 )
 from .interfaces_base import (

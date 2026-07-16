@@ -5,7 +5,7 @@ Define LoRA functionality mixin for model runners.
 """
 
 from contextlib import contextmanager
-from typing import TypeAlias
+from typing import Any, TypeAlias
 
 import numpy as np
 import torch
@@ -16,7 +16,6 @@ from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping, LoRAMappingType
 from vllm.lora.request import LoRARequest
-from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.models import supports_lora
 from vllm.tokenformer.hybrid_adapter_manager import (
     HybridAdapterManager,
@@ -64,19 +63,19 @@ class LoRAModelRunnerMixin:
         device: torch.device,
     ) -> nn.Module:
         if not supports_lora(model):
-            raise ValueError(
-                f"{model.__class__.__name__} does not support LoRA yet.")
+            raise ValueError(f"{model.__class__.__name__} does not support LoRA yet.")
 
         lora_config = vllm_config.lora_config
         kind = _select_adapter_kind(lora_config)
 
         if kind == "tokenformer":
-            self.lora_manager = TokenformerModelManager(
-                model=model, device=device
-            )
+            # Any: three duck-typed manager classes share this slot
+            # (LRU LoRA / tokenformer / hybrid).
+            self.lora_manager: Any = TokenformerModelManager(model=model, device=device)
             logger.info(
                 "Created TokenformerModelManager for model %s on device %s.",
-                model.__class__.__name__, device,
+                model.__class__.__name__,
+                device,
             )
             return self.lora_manager.model
 
@@ -94,7 +93,8 @@ class LoRAModelRunnerMixin:
                 "Created PTWorkerLoRAManager for model %s on device %s. "
                 "If you intended to serve Tokenformer adapters, use "
                 "--enable-tokenformer instead of --enable-lora.",
-                model.__class__.__name__, device,
+                model.__class__.__name__,
+                device,
             )
             return self.lora_manager.create_lora_manager(model, vllm_config)
 
@@ -106,10 +106,10 @@ class LoRAModelRunnerMixin:
         )
         logger.info(
             "Created HybridAdapterManager for model %s on device %s.",
-            model.__class__.__name__, device,
+            model.__class__.__name__,
+            device,
         )
         return self.lora_manager.model
-
 
     def _set_active_loras(
         self,
@@ -158,9 +158,10 @@ class LoRAModelRunnerMixin:
             prompt_lora_mapping, token_lora_mapping, lora_requests, mapping_type
         )
 
-
     @contextmanager
-    def maybe_setup_dummy_loras(self, lora_config: LoRAConfig | None, remove_lora: bool = True):
+    def maybe_setup_dummy_loras(
+        self, lora_config: LoRAConfig | None, remove_lora: bool = True
+    ):
         if lora_config is None:
             yield
         else:
@@ -195,8 +196,6 @@ class LoRAModelRunnerMixin:
             # __exit__ code
             if remove_lora:
                 self.lora_manager.remove_all_adapters()
-
-
 
     @contextmanager
     def maybe_select_dummy_loras(
