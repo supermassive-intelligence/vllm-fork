@@ -452,13 +452,18 @@ class CohereForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
-        is_not_lora = hasattr(self.model.embed_tokens, "weight")
-        if is_not_lora:
-            logits = self.logits_processor(self.model.embed_tokens, hidden_states)
-        else:
-            logits = self.logits_processor(
-                self.model.embed_tokens.base_layer, hidden_states
-            )
+        # Command-R ties word embeddings, so `embed_tokens` doubles as the
+        # lm_head passed to the logits processor. Under `--enable-lora` the
+        # embedding is wrapped as `VocabParallelEmbeddingWithLoRA`, which has no
+        # `quant_method` of its own; the real base layer (and its
+        # `quant_method`) lives at `.base_layer`. Detect the wrapper by that
+        # attribute -- the wrapper also exposes `weight` (delegated from the
+        # base layer), so a `hasattr(..., "weight")` check does NOT distinguish
+        # the LoRA and non-LoRA cases.
+        embed_tokens = self.model.embed_tokens
+        if hasattr(embed_tokens, "base_layer"):
+            embed_tokens = embed_tokens.base_layer
+        logits = self.logits_processor(embed_tokens, hidden_states)
 
         return logits
 
