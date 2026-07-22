@@ -332,3 +332,73 @@ def test_remove_all_clears_both(full_manager, monkeypatch):
     fake_tk.remove_all_adapters.assert_called_once()
     fake_lora.remove_all_adapters.assert_called_once()
     assert mgr._kinds == {}
+
+
+# ---------------------------------------------------------------------------
+# _renormalize_lora_sd_for_model — MoE expert container alignment
+# ---------------------------------------------------------------------------
+
+
+def _renorm(prefix, container, sd):
+    """Call PTWorkerLoRAManager._renormalize_lora_sd_for_model with the two
+    live-model probes stubbed, without constructing the heavy base manager."""
+    import vllm.tokenformer.hybrid_adapter_manager as mod
+
+    stub = mod.PTWorkerLoRAManager.__new__(mod.PTWorkerLoRAManager)
+    stub._detect_model_layers_prefix = lambda: prefix
+    stub._detect_experts_container = lambda: container
+    return mod.PTWorkerLoRAManager._renormalize_lora_sd_for_model(stub, sd)
+
+
+def test_renorm_gemma4_inserts_moe_container_per_layer():
+    """Gemma4 saves grouped experts directly under the layer index
+    (`layers.{N}.experts.*`); the vLLM port wraps them in a `Gemma4MoE`
+    submodule (`layers.{N}.moe.experts.*`). The container must be *inserted*
+    per layer — overwriting the index collapses every layer onto one key
+    (the observed `add_lora` re-normalization collision on real hardware)."""
+    sd = {
+        "language_model.model.layers.0.experts.base_layer.lora_A.weight": 0,
+        "language_model.model.layers.0.experts.lora_A.weight": 1,
+        "language_model.model.layers.1.experts.base_layer.lora_A.weight": 2,
+        "language_model.model.layers.1.experts.lora_A.weight": 3,
+    }
+    out = _renorm("language_model.model.layers.", "moe", sd)
+
+    # No collision: every distinct input key survives.
+    assert len(out) == len(sd)
+    assert (
+        "language_model.model.layers.0.moe.experts.base_layer.lora_A.weight"
+        in out
+    )
+    assert (
+        "language_model.model.layers.1.moe.experts.base_layer.lora_A.weight"
+        in out
+    )
+    # The layer index is preserved, not overwritten by the container.
+    assert not any(".layers.moe.experts" in k for k in out)
+
+
+def test_renorm_phimoe_renames_existing_container():
+    """Phi-mini-MoE saves `mlp.experts`; vLLM PhiMoE names the block
+    `block_sparse_moe.experts`. A container is present, so rename it."""
+    sd = {
+        "model.layers.0.mlp.experts.base_layer.lora_A.weight": 0,
+        "model.layers.1.mlp.experts.base_layer.lora_A.weight": 1,
+    }
+    out = _renorm("model.layers.", "block_sparse_moe", sd)
+
+    assert len(out) == len(sd)
+    assert (
+        "model.layers.0.block_sparse_moe.experts.base_layer.lora_A.weight"
+        in out
+    )
+    assert not any(".mlp.experts" in k for k in out)
+
+
+def test_renorm_matching_container_is_noop():
+    """When the trainer container already matches the live model (OLMoE:
+    `mlp.experts` on both sides), the expert keys pass through unchanged."""
+    sd = {"model.layers.0.mlp.experts.base_layer.lora_A.weight": 0}
+    out = _renorm("model.layers.", "mlp", sd)
+
+    assert list(out) == ["model.layers.0.mlp.experts.base_layer.lora_A.weight"]
