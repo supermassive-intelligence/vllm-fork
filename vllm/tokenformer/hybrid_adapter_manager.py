@@ -292,18 +292,31 @@ class PTWorkerLoRAManager(LRUCacheWorkerLoRAManager):
             else:
                 nk = k  # non-layers key (vision_tower, embed_vision, …)
 
-            # Rewrite the MoE expert container segment onto the live
-            # model's name (e.g. trainer `mlp.experts` -> vLLM PhiMoE
-            # `block_sparse_moe.experts`). Only the segment directly
-            # before `.experts` is touched, and only when it differs.
+            # Align the MoE expert container with the live model's tree.
+            # Two trainer shapes reach us:
+            #   * container present but misnamed — Phi-mini-MoE saves
+            #     `mlp.experts`, vLLM PhiMoE names it
+            #     `block_sparse_moe.experts` -> rename the segment.
+            #   * no container at all — Gemma4 saves the grouped experts
+            #     directly under the layer (`layers.{N}.experts.*`) while
+            #     the vLLM port wraps them in a `Gemma4MoE` submodule
+            #     (`layers.{N}.moe.experts.*`) -> insert the container.
+            # Distinguish by what precedes `experts`: when it is the layer
+            # index (i.e. `experts` sits right after `layers.{N}`) there is
+            # no container yet, so insert rather than overwrite the index —
+            # overwriting collapses every layer onto one key.
             if experts_container is not None:
                 segs = nk.split(".")
                 for i, seg in enumerate(segs):
-                    if seg == "experts" and i > 0 \
-                            and segs[i - 1] != experts_container:
+                    if seg != "experts" or i == 0:
+                        continue
+                    if i >= 2 and segs[i - 2] == "layers":
+                        segs.insert(i, experts_container)
+                        nk = ".".join(segs)
+                    elif segs[i - 1] != experts_container:
                         segs[i - 1] = experts_container
                         nk = ".".join(segs)
-                        break
+                    break
 
             if nk in out:
                 raise ValueError(
