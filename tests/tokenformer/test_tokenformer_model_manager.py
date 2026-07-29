@@ -10,14 +10,10 @@ tests touch real weight-reload machinery.
 from types import SimpleNamespace
 
 import pytest
+import torch
+from torch import nn
 
-torch = pytest.importorskip("torch")
-
-from torch import nn  # noqa: E402
-
-from vllm.tokenformer.tokenformer_model_manager import (  # noqa: E402
-    TokenformerModelManager,
-)
+from vllm.tokenformer.tokenformer_model_manager import TokenformerModelManager
 
 
 @pytest.fixture

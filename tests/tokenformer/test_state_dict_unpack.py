@@ -6,15 +6,10 @@ ForCausalLM.state_dict overrides."""
 
 from types import SimpleNamespace
 
-import pytest
+import torch
+from torch import nn
 
-torch = pytest.importorskip("torch")
-
-from torch import nn  # noqa: E402
-
-from vllm.model_executor.models.utils import (  # noqa: E402
-    unpack_packed_modules_state_dict,
-)
+from vllm.model_executor.models.utils import unpack_packed_modules_state_dict
 
 MAPPING = {
     "qkv_proj": ["q_proj", "k_proj", "v_proj"],
