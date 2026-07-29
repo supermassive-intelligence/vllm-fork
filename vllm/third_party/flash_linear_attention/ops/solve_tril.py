@@ -12,47 +12,12 @@ import os
 
 import torch
 
-from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
+from vllm.triton_utils.allocation import set_triton_allocator
 
 from .index import prepare_chunk_indices
 from .op import make_tensor_descriptor
 from .utils import input_guard, is_amd, is_tma_supported
-
-logger = init_logger(__name__)
-
-# Triton >= 3.x kernels that use host-side TMA descriptors need a
-# registered allocator. Route allocations through torch's caching
-# allocator pinned to the current device: letting torch infer the
-# device from the Triton-provided stream handle crashed with
-# "Overflow when unpacking DeviceIndex" under multi-GPU tensor
-# parallelism.
-#
-# TODO(next-sync): upstream main (post-v0.25.1) added an official
-# equivalent, vllm/triton_utils/allocation.py::set_triton_allocator(),
-# registered at the kernel call sites (fused_moe_lora_op, the GDN ops)
-# with an explicit device. When rebasing past v0.25.1, drop this
-# module-global patch in favor of that mechanism.
-try:
-    if torch.cuda.is_available():
-        from triton.runtime import _allocation
-
-        class TorchAllocator:
-            def get(self):
-                def torch_alloc_fn(size, alignment, stream):
-                    device = torch.accelerator.current_device_index()
-                    with torch.accelerator.device_index(device):
-                        return torch.cuda.caching_allocator_alloc(size, device)
-
-                return torch_alloc_fn
-
-        _allocation._allocator = TorchAllocator()
-except Exception:
-    logger.warning(
-        "Could not register the torch-backed Triton allocator; FLA "
-        "kernels that allocate TMA descriptors may fail.",
-        exc_info=True,
-    )
 
 FLA_TRIL_PRECISION = os.environ.get("FLA_TRIL_PRECISION", "ieee")
 ALLOWED_TRIL_PRECISIONS = ["ieee", "tf32"] if is_amd else ["ieee", "tf32", "tf32x3"]
@@ -579,6 +544,12 @@ def solve_tril(
         merge_fn = merge_16x16_to_32x32_inverse_kernel
     elif BT == 64:
         merge_fn = merge_16x16_to_64x64_inverse_kernel
+
+    if is_tma_supported:
+        # These kernels construct TMA descriptors on-device via
+        # make_tensor_descriptor(), which needs a registered host-side
+        # allocator. Register vLLM's, pinned to this tensor's device.
+        set_triton_allocator(A.device)
 
     merge_fn[NT, B * H](
         A=A,
