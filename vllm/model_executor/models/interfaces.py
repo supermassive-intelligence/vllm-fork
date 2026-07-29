@@ -821,7 +821,7 @@ class IsHybrid(Protocol):
     is_hybrid: ClassVar[Literal[True]] = True
     """
         A flag that indicates this model has both mamba and attention blocks
-        , also indicates that the model's hf_config has
+        , also indicates that the model's hf_config has 
         'layers_block_type' """
 
     @classmethod
@@ -1422,7 +1422,7 @@ class SupportsEagle(SupportsEagleBase, Protocol):
 
     supports_eagle: ClassVar[Literal[True]] = True
     """
-    A flag that indicates this model supports EAGLE-1 and EAGLE-2
+    A flag that indicates this model supports EAGLE-1 and EAGLE-2 
     speculative decoding.
 
     Note:
@@ -1452,7 +1452,7 @@ class SupportsEagle3(SupportsEagleBase, Protocol):
 
     supports_eagle3: ClassVar[Literal[True]] = True
     """
-    A flag that indicates this model supports EAGLE-3
+    A flag that indicates this model supports EAGLE-3 
     speculative decoding.
 
     Note:
