@@ -178,15 +178,12 @@ def cpu_platform_plugin() -> str | None:
                 )
 
         # SCALARLM FIX: Enable CPU platform on Linux when VLLM_TARGET_DEVICE=cpu
-        if not is_cpu:
-            import os
-
-            if os.environ.get("VLLM_TARGET_DEVICE") == "cpu":
-                is_cpu = True
-                logger.debug(
-                    "Confirmed CPU platform is available because"
-                    " VLLM_TARGET_DEVICE=cpu is set."
-                )
+        if not is_cpu and envs.VLLM_TARGET_DEVICE == "cpu":
+            is_cpu = True
+            logger.debug(
+                "Confirmed CPU platform is available because"
+                " VLLM_TARGET_DEVICE=cpu is set."
+            )
 
     except Exception as e:
         logger.debug("CPU platform is not available because: %s", str(e))
@@ -228,7 +225,7 @@ def resolve_current_platform_cls_qualname() -> str:
     # on a machine that also has CUDA/ROCm/XPU dies with "Only one
     # platform plugin can be activated: ['cuda', 'cpu']". Out-of-tree
     # plugins keep their higher precedence below.
-    if os.environ.get("VLLM_TARGET_DEVICE") == "cpu":
+    if envs.VLLM_TARGET_DEVICE == "cpu":
         builtin_plugins: dict = {"cpu": cpu_platform_plugin}
     else:
         builtin_plugins = builtin_platform_plugins

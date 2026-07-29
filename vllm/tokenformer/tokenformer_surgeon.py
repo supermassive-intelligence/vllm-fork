@@ -18,7 +18,6 @@ class TokenformerAdapter(nn.Module):
         self.layer = layer
         self.hidden_size = hidden_size
         self.num_heads = int(os.getenv("TOKENFORMER_NUM_HEADS", "4"))
-        self.head_dim = hidden_size // self.num_heads
         self.tokenformer_r = int(os.getenv("TOKENFORMER_R", "32"))
         # Use a floating-point dtype so parameters can carry gradients. Under
         # quantized loading (e.g. NVFP4) the base layer's weight dtype is an
