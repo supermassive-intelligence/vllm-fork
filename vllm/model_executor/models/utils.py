@@ -1123,7 +1123,7 @@ def unpack_packed_modules_state_dict(
     *,
     prefix: str,
     packed_modules_mapping: Mapping[str, list[str]],
-    config: PretrainedConfig,
+    config: "PretrainedConfig",
 ) -> dict[str, torch.Tensor]:
     """Rewrite a state dict into the ScalarLM trainer's key layout.
 
