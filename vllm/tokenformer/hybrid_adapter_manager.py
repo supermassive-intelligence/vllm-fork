@@ -3,17 +3,9 @@
 """HybridAdapterManager — dispatches adapter operations across a
 Tokenformer sub-manager and a LoRA sub-manager.
 
-Current state (phase 2 skeleton): the Tokenformer sub-manager is real;
-the LoRA sub-manager is a placeholder. `add_adapter` classifies the
-incoming `.pt` file and, if it's pure Tokenformer, delegates. Pure-LoRA
-and hybrid adapters raise NotImplementedError until the LoRA-from-.pt
-loader lands (option C in the rollout plan).
-
-Once option C is in, this class will:
- 1. Split the loaded state dict via split_adapter_state_dict.
- 2. Register the Tokenformer tensors with TokenformerModelManager.
- 3. Register the LoRA tensors with the LoRA worker manager.
- 4. At `set_active_adapters` time, fan out to both sub-managers.
+`add_adapter` classifies the incoming `.pt` file (Tokenformer-only,
+LoRA-only, or hybrid) and registers each half with the appropriate
+sub-manager; at `set_active_adapters` time it fans out to both.
 
 See `docs/design/hybrid_lora_tokenformer.md`.
 """
@@ -264,10 +256,6 @@ class PTWorkerLoRAManager(LRUCacheWorkerLoRAManager):
 class HybridAdapterManager:
     """Manager that composes a Tokenformer sub-manager and a LoRA
     sub-manager behind the same interface the runner mixin expects.
-
-    Phase 2 skeleton: only the Tokenformer half is wired. LoRA/hybrid
-    adapters raise NotImplementedError until the LoRA-from-.pt loader
-    is in place.
     """
 
     def __init__(
@@ -518,4 +506,6 @@ class HybridAdapterManager:
     # --- misc -----------------------------------------------------------
 
     def supports_tower_connector_lora(self) -> bool:
+        if self._lora is not None:
+            return self._lora.supports_tower_connector_lora()
         return False
