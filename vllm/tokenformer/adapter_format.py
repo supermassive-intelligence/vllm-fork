@@ -76,9 +76,12 @@ def normalize_lora_key(key: str) -> str:
          - `model.vision_tower.X`, `model.embed_vision.X`, etc.
            (Gemma4 multimodal sub-modules) → strip leading `model.`
            because vLLM does not nest these under a top-level `model.`.
-         - `model.layers.X` and other decoder-only keys → leave as-is.
-           vLLM's decoder-only module trees (e.g. Qwen3.5) keep the
-           `model.` prefix, so stripping it would break key matching.
+         - `model.layers.X` (decoder-only, e.g. Qwen3.5) →
+           `language_model.model.layers.X`. This vLLM build wraps the
+           decoder under `language_model.model.layers.*` even for
+           decoder-only models, so the trainer-side `model.` prefix
+           needs the same `language_model.model.` promotion as the
+           Gemma4 case above, not a bare strip.
 
       2. PEFT PeftModel adapter-name segment:
          - `.lora_A.default.weight` → `.lora_A.weight`
