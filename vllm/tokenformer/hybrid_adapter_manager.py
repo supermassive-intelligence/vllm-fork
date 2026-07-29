@@ -88,6 +88,11 @@ class PTWorkerLoRAManager(LRUCacheWorkerLoRAManager):
                 self.lora_config.max_lora_rank if self.lora_config is not None else None
             ),
         )
+        # Matches upstream's own _load_adapter: the flag comes from the
+        # request, not from anything this loader inspects in the .pt
+        # file, so copying it through costs nothing even if ScalarLM's
+        # .pt adapters never use the on-disk 3D MoE layout in practice.
+        lora_model.is_3d_lora_weight = lora_request.is_3d_lora_weight
         self._warn_on_zero_base_match(lora_model, loaded.source_path)
         return lora_model
 
