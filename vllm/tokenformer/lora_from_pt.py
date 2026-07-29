@@ -10,8 +10,8 @@ bridges the two: given the LoRA half of a split state dict (from
 `adapter_format.split_adapter_state_dict`), it infers rank / alpha from
 tensor shapes and hands a `LoRAModel` back.
 
-See `docs/design/hybrid_lora_tokenformer.md` — this is the option C
-pure-logic loader, not yet wired into the hybrid manager.
+See `docs/design/hybrid_lora_tokenformer.md` — this is the pure-logic
+loader `hybrid_adapter_manager.py`'s `PTWorkerLoRAManager` calls.
 """
 
 from __future__ import annotations
