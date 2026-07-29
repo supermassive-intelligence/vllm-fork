@@ -48,15 +48,16 @@ void per_token_group_quant_int8(torch::stable::Tensor input,
                                 int64_t group_size, double eps, double int8_min,
                                 double int8_max);
 
-#ifndef USE_ROCM
 // Note: tensor params are passed by value (not by reference) because the
 // PyTorch 2.10 stable ABI's `torch::stable::detail::to<T>` requires `T` to be
 // trivially copyable, which excludes both `Tensor&` and `const Tensor&`.
-// Schema-level mutability is still conveyed via the `Tensor!` marker in the
-// op definition string.
+// permute_cols doesn't mutate its inputs (its schema has no `Tensor!`
+// markers, unlike the quantization ops above), so this is purely an
+// ABI-compatibility change, not a mutability one.
 torch::stable::Tensor permute_cols(torch::stable::Tensor A,
                                    torch::stable::Tensor perm);
 
+#ifndef USE_ROCM
 bool cutlass_scaled_mm_supports_fp8(int64_t cuda_device_capability);
 bool cutlass_scaled_mm_supports_block_fp8(int64_t cuda_device_capability);
 bool cutlass_group_gemm_supported(int64_t cuda_device_capability);
