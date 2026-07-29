@@ -17,6 +17,7 @@ from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping, LoRAMappingType
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.models import supports_lora
+from vllm.tokenformer.adapter_format import AdapterKind
 from vllm.tokenformer.hybrid_adapter_manager import (
     HybridAdapterManager,
     PTWorkerLoRAManager,
@@ -30,10 +31,7 @@ InputBatch: TypeAlias = TPUInputBatch | GPUInputBatch
 logger = init_logger(__name__)
 
 
-_AdapterKind: TypeAlias = "str"  # "lora" | "tokenformer" | "hybrid"
-
-
-def _select_adapter_kind(lora_config: LoRAConfig | None) -> _AdapterKind:
+def _select_adapter_kind(lora_config: LoRAConfig | None) -> AdapterKind:
     """Classify which adapter manager the runner should instantiate.
 
     The runner only reaches `load_lora_model` when `lora_config is not None`,
