@@ -156,14 +156,16 @@ manager and routes calls by adapter kind:
 
 ```text
 HybridAdapterManager
-├── LoRAModelManager         (per-request, many slots)
+├── PTWorkerLoRAManager      (per-request LoRA, many slots)
 └── TokenformerModelManager  (global, one active)
 ```
 
 The runner keeps its existing `self.lora_manager` attribute (for backward
 compat), but the object it holds is the hybrid when both are enabled.
-When only LoRA is enabled, it's a plain `LoRAModelManager`. When only
-Tokenformer is enabled, it's today's `TokenformerModelManager`.
+When only LoRA is enabled, it uses the `.pt`-aware
+`PTWorkerLoRAManager`, which falls back to upstream's PEFT loader for
+standard adapters. When only Tokenformer is enabled, it uses
+`TokenformerModelManager`.
 
 ### 4.2 Load order
 
@@ -212,12 +214,23 @@ Four possible shapes:
 | true | true | hybrid |
 | false | false | reject at load — nothing to activate |
 
-The state dict is **split at load time** into two sub-dicts. The
-Tokenformer portion is registered with `TokenformerModelManager`; the
-LoRA portion is registered with `LoRAModelManager` (after reshaping
-into the internal LoRA weight layout). Both are keyed by the same
-`adapter_id`, so a single `set_active_adapter(id)` on the hybrid
-manager fans out to both sub-managers.
+The state dict is **classified and split at load time**. The LoRA
+sub-manager consumes the LoRA-only slice after reshaping it into vLLM's
+internal weight layout. The Tokenformer sub-manager currently re-loads
+the raw `.pt` file through its existing interface and filters LoRA keys
+during activation; passing the already-split Tokenformer slice through
+would be a separate I/O optimization. Both registrations use the same
+`adapter_id`, so a single `set_active_adapter(id)` on the hybrid manager
+fans out to both sub-managers.
+
+LoRA keys receive two normalization passes. Pure string normalization
+removes PEFT/wrapper-only path segments and preserves the standard
+`model.layers.*` prefix used by text-only causal LMs. Immediately before
+constructing the `LoRAModel`, the worker manager resolves the decoder
+prefix against the live model's `named_modules()` tree. This second pass
+handles multimodal wrappers whose text decoder is exposed under
+`language_model.model.layers.*`; when a vision tower is visited first,
+the resolver explicitly prefers the text-decoder prefix.
 
 Request routing is then a property of the *loaded* adapter, not the
 request — the client just passes an adapter id. The hybrid manager
@@ -246,15 +259,11 @@ So there is no direct state-dict collision. However:
   changed. See §6 (open questions) — needs a targeted test before we can
   choose.
 
-- The `'lora'`-substring skip in `activate_adapter` (line 97) becomes
-  load-bearing once hybrid adapters exist: a single `.pt` can now
-  legitimately contain both Tokenformer and LoRA tensors, and the
-  Tokenformer activation path must *only* replay the Tokenformer
-  portion into the base state dict. Tighten the match to
-  `.lora_A.` / `.lora_B.` path segments (not substring), and in the
-  hybrid manager do the split at `add_adapter` time so `activate_adapter`
-  only ever sees a pre-filtered Tokenformer sub-dict — the in-activate
-  skip stays as a defense-in-depth assert.
+- The LoRA-key skip in `TokenformerModelManager.activate_adapter` is
+  load-bearing for hybrid adapters because that sub-manager currently
+  re-loads the raw `.pt` file. It must never replay LoRA tensors into the
+  base state dict. The classifier uses exact `.lora_A.` / `.lora_B.`
+  path segments; the activation-side filter remains defense in depth.
 
 ### 4.5 Warmup path
 
@@ -267,32 +276,23 @@ When both are enabled:
   adapter is loaded, so warmup already exercises the tokenformer code
   path).
 
-The hybrid's `add_dummy_lora` forwards only to the LoRA manager. The
-skip-unregistered-id guard we added in `6529423ba` keeps this safe if a
-dummy request ever leaks into the tokenformer path.
+The hybrid's `add_dummy_lora` fans out to both managers to preserve the
+shared worker-manager contract. The Tokenformer call is a no-op, and the
+skip-unregistered-id guard added in `6529423ba` keeps the warmup request
+safe if it later reaches Tokenformer activation.
 
 ### 4.6 Config & CLI
 
-Introduce one new flag:
+The adapter modes are selected by two flags:
 
 ```text
 --enable-tokenformer           # default: false
 ```
 
-And redefine `--enable-lora`:
-
-- `--enable-lora` → LoRA manager only (today's *intended* semantics).
-- `--enable-tokenformer` → Tokenformer manager only (today's *actual*
-  semantics, renamed).
+- `--enable-lora` → `.pt`-aware LoRA manager only.
+- `--enable-tokenformer` → Tokenformer manager only.
 - Both flags → hybrid manager.
-- Neither flag → no adapter manager (existing behavior).
-
-This is a breaking change for anyone currently relying on
-`--enable-lora` producing a Tokenformer manager. The v1 rollout ships
-with a compatibility shim: if `--enable-lora` is set *and* any adapter
-path the server sees looks like a Tokenformer adapter (by the sniffing
-rule in §4.3), log a deprecation warning and implicitly set
-`--enable-tokenformer` as well. Remove the shim after one release.
+- Neither flag → no adapter manager.
 
 ### 4.7 Hybrid-adapter semantics (sharp edge)
 
@@ -319,36 +319,35 @@ Two consequences:
 Document the constraint in the user-facing guide next to the
 `--enable-tokenformer` flag.
 
-## 5. Phased implementation
+## 5. Implementation status
 
-The work is large; ship it in reviewable chunks.
+The feature was delivered in phases. Phases 0–2 are implemented; phases
+3–4 remain follow-up work.
 
-**Phase 0 — baseline tests (no behavior change).** Land tests that pin
-down today's behavior:
+**Phase 0 — baseline tests (complete).** Tests pinned down the original
+behavior:
 
 - LoRA-only server with a LoRA adapter: confirm `activate_adapter` works.
-  (This will *fail* today, which motivates phase 1.)
+  (This failed before phase 1 and motivated the manager split.)
 - Tokenformer-only server with a Tokenformer adapter: confirm activation.
 - Warmup run with both `enable_lora=True` and a registered LoRA adapter
   vs. a registered Tokenformer adapter.
 
-**Phase 1 — split the managers.** Stop always instantiating Tokenformer
-from `load_lora_model`. Introduce `--enable-tokenformer`, wire the
-existing Tokenformer manager behind it, and fix `--enable-lora` to
-instantiate `LoRAModelManager` as originally intended. Compatibility
-shim described in §4.6. No hybrid yet — the two flags are still
-mutually exclusive at this point.
+**Phase 1 — split the managers (complete).** Stopped always instantiating
+Tokenformer from `load_lora_model`, introduced `--enable-tokenformer`,
+wired the existing Tokenformer manager behind it, and fixed
+`--enable-lora` to instantiate `LoRAModelManager` as originally intended.
 
-**Phase 2 — hybrid manager.** Add `HybridAdapterManager` and allow both
-flags to be set together. Load order per §4.2. Adapter-kind detection
-and state-dict splitting per §4.3. Warmup per §4.5. Hybrid-adapter
-semantics per §4.7.
+**Phase 2 — hybrid manager (complete).** Added `HybridAdapterManager` and
+allowed both flags to be set together. Load order per §4.2. Adapter-kind
+detection and state-dict splitting per §4.3. Warmup per §4.5.
+Hybrid-adapter semantics per §4.7.
 
-**Phase 3 — `process_weights_after_loading` tightening.** Resolve the
+**Phase 3 — `process_weights_after_loading` tightening (pending).** Resolve the
 open question in §6. Either confirm idempotency or narrow the call
 scope.
 
-**Phase 4 — docs, examples, benchmarks.** Recipe update showing a
+**Phase 4 — docs, examples, benchmarks (pending).** Recipe update showing a
 server with a Tokenformer base adapter *and* several LoRA adapters
 handling different request slices.
 
@@ -367,15 +366,6 @@ handling different request slices.
   does `ColumnParallelLinearWithLoRA` expose the raw base weight in a
   way that `process_weights_after_loading` can requantize without going
   through the LoRA path?
-
-- **LoRA key naming convention inside `.pt`.** The sniffing rule in
-  §4.3 assumes `.lora_A.` / `.lora_B.` path segments scoped by target
-  module (e.g. `model.layers.0.self_attn.q_proj.lora_A.weight`). The
-  training side has to emit keys in that shape or the hybrid loader
-  can't route them. We should pin the expected layout in a
-  `training/adapter-format.md` doc and add a schema check on load so
-  malformed `.pt`s fail early with a useful message instead of silently
-  skipping.
 
 - **Profiling.** Tokenformer adds ~hundreds of milliseconds when
   swapping adapters (weight reload + process_weights). LoRA swap is
@@ -404,9 +394,9 @@ Must-have tests before merging phase 2:
    lora_A/lora_B keys loads; activating it applies both portions;
    deactivating it restores the base weights *and* frees the LoRA slot.
 7. **Split correctness.** After `add_adapter` on a hybrid `.pt`, the
-   TokenformerModel's state dict contains only tokenformer tensors and
-   base overrides, and the LoRAModel's weights contain only lora_A/B
-   tensors — no cross-contamination.
+   LoRAModel's weights contain only LoRA tensors, and Tokenformer
+   activation applies only Tokenformer tensors and base overrides — no
+   cross-contamination reaches the live model.
 
 ## 8. Alternatives considered
 

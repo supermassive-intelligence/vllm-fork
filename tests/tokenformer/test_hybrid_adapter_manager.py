@@ -1,13 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for HybridAdapterManager routing.
+"""Unit tests for HybridAdapterManager routing and live-prefix resolution.
 
 No model, no torch cuda — we stub TokenformerModelManager with a
 MagicMock and assert the hybrid manager wires the right sub-manager
 call for each adapter kind.
-
-Covers the phase 2 skeleton; LoRA / hybrid adapters still raise
-NotImplementedError until the LoRA-from-.pt loader lands.
 """
 
 from contextlib import contextmanager
@@ -43,6 +40,64 @@ def patched_manager(monkeypatch):
 def _fake_loaded(kind, path="/tmp/fake-adapter"):
     """Minimal stand-in for LoadedAdapter."""
     return SimpleNamespace(kind=kind, source_path=path, tokenformer_sd={}, lora_sd={})
+
+
+def _pt_manager_with_modules(*module_names):
+    """Construct only the prefix-resolver portion of the worker manager."""
+    import vllm.tokenformer.hybrid_adapter_manager as mod
+
+    model = SimpleNamespace(
+        named_modules=lambda: ((name, object()) for name in module_names)
+    )
+    manager = object.__new__(mod.PTWorkerLoRAManager)
+    manager._adapter_manager = SimpleNamespace(model=model)
+    return manager
+
+
+def test_runtime_prefix_resolution_for_text_only_qwen35():
+    from vllm.tokenformer.adapter_format import normalize_lora_key
+
+    manager = _pt_manager_with_modules("model.layers.0.self_attn")
+    assert manager._detect_model_layers_prefix() == "model.layers."
+
+    tensor = object()
+    normalized_key = normalize_lora_key(
+        "model.layers.0.self_attn.q_proj.lora_A.default.weight"
+    )
+    result = manager._renormalize_lora_sd_for_model({normalized_key: tensor})
+    assert result == {"model.layers.0.self_attn.q_proj.lora_A.weight": tensor}
+
+
+def test_runtime_prefix_resolution_prefers_multimodal_text_decoder():
+    from vllm.tokenformer.adapter_format import normalize_lora_key
+
+    # named_modules() visits the vision tower first on Gemma4. The resolver
+    # must still choose the language decoder rather than the first layers tree.
+    manager = _pt_manager_with_modules(
+        "vision_tower.encoder.layers.0.self_attn",
+        "language_model.model.layers.0.self_attn",
+    )
+    assert manager._detect_model_layers_prefix() == "language_model.model.layers."
+
+    text_tensor = object()
+    vision_tensor = object()
+    text_key = normalize_lora_key(
+        "model.language_model.layers.0.self_attn.q_proj.lora_A.default.weight"
+    )
+    vision_key = normalize_lora_key(
+        "model.vision_tower.encoder.layers.0.self_attn.q_proj"
+        ".linear.lora_A.default.weight"
+    )
+    result = manager._renormalize_lora_sd_for_model(
+        {
+            text_key: text_tensor,
+            vision_key: vision_tensor,
+        }
+    )
+    assert result == {
+        "language_model.model.layers.0.self_attn.q_proj.lora_A.weight": text_tensor,
+        "vision_tower.encoder.layers.0.self_attn.q_proj.lora_A.weight": vision_tensor,
+    }
 
 
 def test_model_property_forwards_to_tokenformer(patched_manager):
@@ -186,10 +241,10 @@ def test_add_dummy_lora_forwards_rank(patched_manager):
     fake_tk.add_dummy_lora.assert_called_once_with(req, rank=4)
 
 
-def test_list_adapters_normalizes_tokenformer_dict(patched_manager):
+def test_list_adapters_accepts_tokenformer_mapping(patched_manager):
     mgr, fake_tk = patched_manager
-    # TokenformerModelManager.list_adapters returns a dict — the hybrid
-    # manager must coerce it to a set.
+    # The current Tokenformer manager returns a set, but keep the hybrid
+    # boundary tolerant of mapping-shaped results from legacy callers.
     fake_tk.list_adapters.return_value = {1: object(), 2: object()}
     assert mgr.list_adapters() == {1, 2}
 
@@ -199,7 +254,7 @@ def test_supports_tower_connector_lora_is_false(patched_manager):
     assert mgr.supports_tower_connector_lora() is False
 
 
-# --- LoRA-wired path (skeleton with both sub-managers) ----------------
+# --- LoRA-wired path with both sub-managers ----------------------------
 
 
 @pytest.fixture
