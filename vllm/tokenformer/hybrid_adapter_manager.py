@@ -70,10 +70,10 @@ class PTWorkerLoRAManager(LRUCacheWorkerLoRAManager):
                 f"--enable-tokenformer instead, or as a hybrid adapter "
                 f"with both --enable-lora and --enable-tokenformer."
             )
-        # Re-normalize the lora_sd using the live model's prefix so the
-        # same .pt file works across model families (e.g. Qwen3-4B uses
-        # `model.layers.*` while Qwen3.5-4B uses
-        # `language_model.model.layers.*`).
+        # Resolve decoder keys against the live model so the same .pt
+        # loader works for text-only models (`model.layers.*`, including
+        # Qwen3.5) and multimodal wrappers
+        # (`language_model.model.layers.*`, including Gemma4).
         lora_sd = self._renormalize_lora_sd_for_model(loaded.lora_sd)
         lora_model = load_lora_model_from_pt(
             lora_sd,
@@ -102,9 +102,9 @@ class PTWorkerLoRAManager(LRUCacheWorkerLoRAManager):
         training-side ``model.layers.`` prefix in LoRA keys.
 
         Known variants:
-          - ``model.layers.``            — standard decoder-only (Qwen3)
-          - ``language_model.model.layers.`` — VL-wrapped decoder
-                                               (Qwen3.5, Gemma4)
+          - ``model.layers.`` — text-only causal LM (Qwen3, Qwen3.5)
+          - ``language_model.model.layers.`` — multimodal wrapper
+                                               (Gemma4, Qwen3.5-VL)
 
         Falls back to ``model.layers.`` (the vLLM default) if the
         model tree is not accessible.
@@ -157,16 +157,13 @@ class PTWorkerLoRAManager(LRUCacheWorkerLoRAManager):
     def _renormalize_lora_sd_for_model(self, lora_sd: dict) -> dict:
         """Re-run key normalization using the live model's prefix.
 
-        ``adapter_format.normalize_lora_key`` uses a static rule that
-        maps ``model.layers.*`` to ``language_model.model.layers.*``
-        (needed for Qwen3.5/Gemma4).  For models whose vLLM tree really
-        does use ``model.layers.*`` (e.g. Qwen3-4B-Instruct) that
-        mapping is wrong.
-
-        This method detects the correct target prefix from the live
-        model, then re-applies *only* the structural part of the
-        normalization (prefix swap + PEFT ``.default.`` strip +
-        ClippableLinear ``.linear.`` strip) with the right target.
+        ``adapter_format.normalize_lora_key`` preserves text-only
+        ``model.layers.*`` keys and converts HF multimodal
+        ``model.language_model.*`` keys to
+        ``language_model.model.*``. This method then detects the final
+        decoder prefix from the live model and applies it consistently.
+        Keeping this runtime resolution is important for multimodal
+        models, where a vision tower may also contain a ``layers`` tree.
         """
         target_prefix = self._detect_model_layers_prefix()
         # target_prefix is e.g. "model.layers." or
@@ -176,9 +173,8 @@ class PTWorkerLoRAManager(LRUCacheWorkerLoRAManager):
         for k, v in lora_sd.items():
             # The key has already been through normalize_lora_key once
             # (inside load_adapter_from_pt -> split_adapter_state_dict).
-            # That pass may have mapped it to the wrong prefix.  We
-            # undo the structural prefix and re-apply with the correct
-            # target.
+            # Reduce either supported decoder prefix to a common form,
+            # then apply the live model's target prefix.
 
             # Undo any previous prefix normalization: if the key starts
             # with a known vLLM prefix that isn't the target, strip it
@@ -278,10 +274,9 @@ class HybridAdapterManager:
             + tokenformer_delta(x)   (added by the surgeon wrapper)
 
         When `vllm_config` is None (or `vllm_config.lora_config` is
-        None), the LoRA sub-manager is not instantiated and the
-        hybrid manager behaves like a pure Tokenformer manager — this
-        keeps the skeleton path alive for callers that haven't flipped
-        to hybrid yet.
+        None), the LoRA sub-manager is not instantiated and the manager
+        behaves like a pure Tokenformer manager. This compatibility path
+        is also useful to lightweight tests and legacy callers.
         """
         lora_enabled = vllm_config is not None and vllm_config.lora_config is not None
 
@@ -307,12 +302,9 @@ class HybridAdapterManager:
 
     @property
     def model(self) -> nn.Module:
-        # Today this is the Tokenformer-wrapped model. When the LoRA
-        # sub-manager arrives, order will be: apply LoRA layer
-        # replacement first, then Tokenformer surgeon on top — so this
-        # property will return the model after both passes. The
-        # Tokenformer sub-manager already holds a reference to the
-        # post-surgeon model, so reading from it Just Works.
+        # LoRA layer replacement runs first when enabled, followed by
+        # Tokenformer surgery. The Tokenformer sub-manager therefore owns
+        # the final model after both transformations.
         return self._tokenformer.model
 
     # --- adapter lifecycle ---------------------------------------------
@@ -327,8 +319,8 @@ class HybridAdapterManager:
 
         The sub-managers each re-load the `.pt` file from disk. This is
         redundant (we already classified once) but keeps their existing
-        interfaces intact. Phase 2 isn't perf-sensitive; we'll tighten
-        this in a later step by passing pre-split dicts through.
+        interfaces intact. Passing pre-split dictionaries through would
+        be a separate performance optimization.
         """
         # Resolve like both sub-managers do (absolute/relative paths,
         # HF-hub ids) — classification must open the same directory the

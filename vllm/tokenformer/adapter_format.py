@@ -41,7 +41,7 @@ _LORA_PATH_SEGMENTS = (
 
 
 def normalize_lora_key(key: str) -> str:
-    """Normalize a training-side LoRA key to vLLM's expected shape.
+    """Normalize a training-side LoRA key toward vLLM's module shape.
 
     The ScalarLM trainer exports HF-shaped keys with a
     Gemma4ForConditionalGeneration + PeftModel + Gemma4ClippableLinear
@@ -59,10 +59,9 @@ def normalize_lora_key(key: str) -> str:
         vision_tower.encoder.layers.<N>...      (no leading `model.`)
         embed_vision.embedding_projection       (no leading `model.`)
 
-    For decoder-only models (e.g. Qwen3.5), the trainer saves keys under
-    the standard HF `model.layers.<N>...` prefix, which matches vLLM's
-    module tree exactly — vLLM keeps the `model.` prefix for these models.
-    Example:
+    For text-only causal LMs (including Qwen3 and Qwen3.5), the trainer
+    saves keys under the standard HF `model.layers.<N>...` prefix. That
+    already matches vLLM's module tree, so the prefix is preserved:
 
         model.layers.0.self_attn.q_proj.lora_A.default.weight
         → model.layers.0.self_attn.q_proj.lora_A.weight   (step 2 only)
@@ -73,15 +72,17 @@ def normalize_lora_key(key: str) -> str:
          - `model.language_model.X` → `language_model.model.X`
            (HF has `.language_model.layers`; vLLM has `.language_model.model.layers`.
            Swap them.)
+         - `model.layers.X` → leave unchanged. Text-only causal-LM
+           module trees retain this prefix.
          - `model.vision_tower.X`, `model.embed_vision.X`, etc.
            (Gemma4 multimodal sub-modules) → strip leading `model.`
            because vLLM does not nest these under a top-level `model.`.
-         - `model.layers.X` (decoder-only, e.g. Qwen3.5) →
-           `language_model.model.layers.X`. This vLLM build wraps the
-           decoder under `language_model.model.layers.*` even for
-           decoder-only models, so the trainer-side `model.` prefix
-           needs the same `language_model.model.` promotion as the
-           Gemma4 case above, not a bare strip.
+
+         Before LoRA construction, `PTWorkerLoRAManager` still resolves
+         either decoder prefix against the live model. That runtime step
+         is required for multimodal wrappers whose decoder is exposed as
+         `language_model.model.layers.*`, and avoids guessing from the
+         checkpoint alone.
 
       2. PEFT PeftModel adapter-name segment:
          - `.lora_A.default.weight` → `.lora_A.weight`
@@ -96,13 +97,11 @@ def normalize_lora_key(key: str) -> str:
         # Gemma4 language tower: HF has `.language_model.layers`;
         # vLLM has `.language_model.model.layers`.
         key = "language_model.model." + key[len("model.language_model.") :]
-    elif key.startswith("model.layers."):
-        # Qwen3.5: trainer saves under `model.layers.*` but this vLLM
-        # build wraps the decoder under `language_model.model.layers.*`.
-        key = "language_model.model." + key[len("model.") :]
-    elif key.startswith("model."):
+    elif key.startswith("model.") and not key.startswith("model.layers."):
         # Gemma4 multimodal sub-modules (vision_tower, embed_vision, …):
         # vLLM exposes these without the top-level `model.` wrapper.
+        # Text-only causal LMs retain `model.layers.*`; the live-model
+        # resolver promotes it when the decoder is in a multimodal wrapper.
         key = key[len("model.") :]
 
     # Step 2 — strip PEFT's PeftModel `.default` adapter-name segment.

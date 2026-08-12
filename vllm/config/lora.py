@@ -47,8 +47,8 @@ class LoRAConfig:
     enable_tokenformer: bool = False
     """If True, enable handling of Tokenformer adapters via
     `TokenformerModelManager`. When both `enable_lora` and
-    `enable_tokenformer` are set, the runner selects the hybrid manager
-    (still under construction — see the design doc for the rollout plan)."""
+    `enable_tokenformer` are set, the runner selects
+    `HybridAdapterManager`."""
     max_lora_rank: MaxLoRARanks = 16
     """Max LoRA rank."""
     max_loras: int = Field(default=1, ge=1)
