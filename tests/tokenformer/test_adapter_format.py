@@ -176,6 +176,18 @@ def test_normalize_gemma4_mlp_key_from_real_trainer_output():
     )
 
 
+def test_normalize_keeps_model_prefix_for_text_only_causal_lm():
+    """Text-only Qwen3/Qwen3.5 trees use ``model.layers.*`` in vLLM.
+
+    The runtime resolver remains responsible for promoting this prefix
+    when the live decoder is nested inside a multimodal wrapper.
+    """
+    trainer_key = "model.layers.0.self_attn.q_proj.lora_A.default.weight"
+    assert normalize_lora_key(trainer_key) == (
+        "model.layers.0.self_attn.q_proj.lora_A.weight"
+    )
+
+
 def test_split_normalizes_peft_default_segment():
     """`.lora_A.default.weight` and `.lora_B.default.weight` collapse
     to vLLM's expected `.lora_A.weight` / `.lora_B.weight`, combined
@@ -212,6 +224,7 @@ def test_normalize_is_idempotent():
     # Already-normalized keys (in vLLM module shape) pass through
     # unchanged.
     for already_normalized in [
+        "model.layers.0.self_attn.q_proj.lora_A.weight",
         "language_model.model.layers.0.self_attn.q_proj.lora_A.weight",
         "vision_tower.encoder.layers.0.mlp.down_proj.lora_B.weight",
         "embed_vision.embedding_projection.lora_A.weight",

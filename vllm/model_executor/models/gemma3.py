@@ -455,7 +455,9 @@ class Gemma3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsTokenformer
         # their unpacked HF names. Scoped to `prefix` so recursion from
         # a wrapper module (e.g. multimodal gemma3) can't rewrite
         # sibling modules' keys in the shared destination dict.
-        state_dict = super().state_dict(destination, prefix, keep_vars)
+        state_dict = super().state_dict(
+            destination=destination, prefix=prefix, keep_vars=keep_vars
+        )
         if not scalarlm_state_dict_export_enabled():
             return state_dict
         return unpack_packed_modules_state_dict(
