@@ -18,6 +18,7 @@ from vllm.model_executor.models.utils import enable_scalarlm_state_dict_export
 from vllm.tokenformer.tokenformer_surgeon import (
     TokenformerSurgeon,
 )
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 logger = init_logger(__name__)
 
@@ -165,15 +166,20 @@ class TokenformerModelManager:
         process_weights_after_loading(self.model, self.model.model_config, self.device)
 
     def add_adapter(self, request) -> bool:
-        lora_path = get_adapter_absolute_path(request.lora_path)
-        tokenformer = self.tokenformer_model_cls.from_local_checkpoint(
-            lora_path, device=self.device
-        )
+        # One-time per adapter, mirroring WorkerLoRAManager.add_adapter:
+        # loading a checkpoint onto the device legitimately syncs, and so
+        # does restoring base weights when the LRU evicts. The bookkeeping
+        # below touches no device memory, so it stays outside the region.
+        with gpu_sync_allowed():
+            lora_path = get_adapter_absolute_path(request.lora_path)
+            tokenformer = self.tokenformer_model_cls.from_local_checkpoint(
+                lora_path, device=self.device
+            )
 
-        if len(self._registered_adapters) >= self.capacity:
-            # Remove the least recently used adapter
-            lru_adapter_id = self._lru_adaptor_ids.pop(0)
-            self.remove_adapter(lru_adapter_id)
+            if len(self._registered_adapters) >= self.capacity:
+                # Remove the least recently used adapter
+                lru_adapter_id = self._lru_adaptor_ids.pop(0)
+                self.remove_adapter(lru_adapter_id)
 
         self._registered_adapters[request.adapter_id] = tokenformer
         self._lru_adaptor_ids.append(request.adapter_id)

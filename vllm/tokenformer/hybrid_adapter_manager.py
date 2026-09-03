@@ -25,6 +25,7 @@ from vllm.tokenformer.adapter_format import (
 )
 from vllm.tokenformer.lora_from_pt import load_lora_model_from_pt
 from vllm.tokenformer.tokenformer_model_manager import TokenformerModelManager
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 if TYPE_CHECKING:
     import torch
@@ -325,36 +326,40 @@ class HybridAdapterManager:
         # Resolve like both sub-managers do (absolute/relative paths,
         # HF-hub ids) — classification must open the same directory the
         # sub-managers will load from.
-        lora_path = get_adapter_absolute_path(lora_request.lora_path)
-        loaded = load_adapter_from_pt(lora_path)
-        kind = loaded.kind
-        self._kinds[lora_request.adapter_id] = kind
+        # One-time per adapter, mirroring WorkerLoRAManager.add_adapter:
+        # classifying and loading a checkpoint legitimately syncs. The LoRA
+        # half opens its own region too; the allow-depth is refcounted.
+        with gpu_sync_allowed():
+            lora_path = get_adapter_absolute_path(lora_request.lora_path)
+            loaded = load_adapter_from_pt(lora_path)
+            kind = loaded.kind
+            self._kinds[lora_request.adapter_id] = kind
 
-        # Tokenformer half.
-        if kind in ("tokenformer", "hybrid"):
-            self._tokenformer.add_adapter(lora_request)
+            # Tokenformer half.
+            if kind in ("tokenformer", "hybrid"):
+                self._tokenformer.add_adapter(lora_request)
 
-        # LoRA half.
-        if kind in ("lora", "hybrid"):
-            if self._lora is None:
-                self._kinds.pop(lora_request.adapter_id, None)
-                raise RuntimeError(
-                    f"Adapter {lora_request.adapter_id} at "
-                    f"{loaded.source_path} contains LoRA tensors, but the "
-                    f"HybridAdapterManager was constructed without a "
-                    f"LoRA-enabled vllm_config. Pass "
-                    f"--enable-lora alongside --enable-tokenformer."
-                )
-            try:
-                self._lora.add_adapter(lora_request)
-            except Exception:
-                # Don't leave a half-registered hybrid behind: a stale
-                # tokenformer half plus its _kinds entry would
-                # ghost-activate on later batches.
-                if kind == "hybrid":
-                    self._tokenformer.remove_adapter(lora_request.adapter_id)
-                self._kinds.pop(lora_request.adapter_id, None)
-                raise
+            # LoRA half.
+            if kind in ("lora", "hybrid"):
+                if self._lora is None:
+                    self._kinds.pop(lora_request.adapter_id, None)
+                    raise RuntimeError(
+                        f"Adapter {lora_request.adapter_id} at "
+                        f"{loaded.source_path} contains LoRA tensors, but the "
+                        f"HybridAdapterManager was constructed without a "
+                        f"LoRA-enabled vllm_config. Pass "
+                        f"--enable-lora alongside --enable-tokenformer."
+                    )
+                try:
+                    self._lora.add_adapter(lora_request)
+                except Exception:
+                    # Don't leave a half-registered hybrid behind: a stale
+                    # tokenformer half plus its _kinds entry would
+                    # ghost-activate on later batches.
+                    if kind == "hybrid":
+                        self._tokenformer.remove_adapter(lora_request.adapter_id)
+                    self._kinds.pop(lora_request.adapter_id, None)
+                    raise
 
         return True
 
